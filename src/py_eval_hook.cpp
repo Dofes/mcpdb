@@ -100,9 +100,7 @@ void UninstallBreakpointHook() {
 }
 
 void InstallBreakpointHook() {
-    auto addr = memory::resolveSignature(
-        "81 FD FC 00 00 00 0F 87 45 2A 00 00 48 63 C5 41 0F B6 84 03 08 90 C7 0A 41 8B 8C 83 60 8E C7 0A 49 03 CB FF E1"
-    );
+    auto addr = memory::resolveSignature("81 FD FC 00 00 00 0F 87 ? ? 00 00 48 63 C5 41");
 
     if (!addr) {
         std::cout << "Failed to find signature!" << std::endl;
@@ -246,12 +244,10 @@ void InstallBreakpointHook() {
 thread_local PyFrameObject* currentFrame  = nullptr;
 thread_local bool           isShouldDebug = false;
 
-static bool g_dapEnabled     = false;
 static bool g_dapInitialized = false;
 
 void initDAPDebugger(int port) {
     if (!g_dapInitialized) {
-        g_dapEnabled     = true;
         g_dapInitialized = true;
         getDebugger().initialize(port);
         std::cout << "[DAP] Debugger initialized on port " << port << std::endl;
@@ -262,7 +258,8 @@ void initDAPDebugger(int port) {
 SKY_AUTO_STATIC_HOOK(
     EvalFrameExHook,
     HookPriority::Normal,
-    "40 56 41 57 48 81 EC F8 00 00 00 48 8B 05 DE 58 14 06 48 33 C4 48 89 84 24 D8 00 00 00 48 8B 41 ",
+    "40 56 41 57 48 81 EC F8 00 00 00 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 D8 00 00 00 48 8B 41 20 8B F2 4C 8B F9 48 "
+    "89 4C 24 38 44 8B 80 80 00 00 00 41 8D 80 F1 4D B6 35",
     _object*,
     PyFrameObject* f,
     int            throwflag
@@ -272,12 +269,13 @@ SKY_AUTO_STATIC_HOOK(
         initDAPDebugger(9527);
         isShouldDebug = false;
         currentFrame  = f;
-        isShouldDebug = true;
-        if (g_dapEnabled) {
+
+        if (getDebugger().isRunning()) {
             getDebugger().onFrameEnter(f);
+            isShouldDebug = getDebugger().hasBreakpointInCurrentFrame();
         }
         auto ori = origin(f, throwflag);
-        if (g_dapEnabled) {
+        if (getDebugger().isRunning()) {
             getDebugger().onFrameExit(f);
         }
         currentFrame = nullptr;
@@ -289,15 +287,9 @@ SKY_AUTO_STATIC_HOOK(
 
 
 void PyEval_EvalFrameEx_eval_opcode_loop() {
-    if (!g_dapEnabled) return;
     if (!isShouldDebug) return;
     if (!currentFrame) return;
 
-    PyCodeObject* code = currentFrame->f_code;
-
-    if (!getDebugger().hasBreakpoint(std::string(((PyStringObject*)code->co_filename)->ob_sval))) {
-        return;
-    }
     static thread_local int lastLine = -1;
 
     int line = PyFrame_GetLineNumber(currentFrame);
@@ -306,9 +298,6 @@ void PyEval_EvalFrameEx_eval_opcode_loop() {
         return;
     }
     lastLine = line;
-
-    std::cout << "Current line: " << line << std::endl;
-
 
     getDebugger().onLineExecute(currentFrame, line);
 }

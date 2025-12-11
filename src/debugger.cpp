@@ -222,11 +222,6 @@ DAPDebugger::~DAPDebugger() {
 bool DAPDebugger::initialize(int port) {
     state_ = DebuggerState::Initializing;
     startServer(port);
-
-    std::cout << "[DAP] Waiting for debugger to attach..." << std::endl;
-    waitForCommand();
-    std::cout << "[DAP] Debugger attached, starting execution" << std::endl;
-
     return true;
 }
 
@@ -826,6 +821,8 @@ bool DAPDebugger::hasBreakpoint(const std::string& source) {
     return false;
 }
 
+bool DAPDebugger::hasBreakpointInCurrentFrame() { return hasBreakpoint(cachedFilename_); }
+
 // ============== 变量处理 ==============
 
 int DAPDebugger::registerVariableReference(PyHandle obj) {
@@ -976,8 +973,6 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
         cachedFrame_       = frame;
         cachedFilename_    = source;
     }
-
-    std::cout << "[DAP] Executing " << source << ":" << line << std::endl;
 
     bool        shouldStop = false;
     std::string stopReason;

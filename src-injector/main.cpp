@@ -125,13 +125,13 @@ void elevateToAdmin() {
     }
 }
 
-auto checkAdmin = []() {
-    if (!isRunningAsAdmin()) {
-        elevateToAdmin();
-        exit(0);
-    }
-    return 0;
-}();
+// auto checkAdmin = []() {
+//     if (!isRunningAsAdmin()) {
+//         elevateToAdmin();
+//         exit(0);
+//     }
+//     return 0;
+// }();
 
 
 static bool TitleContainsMinecraft(HWND hwnd) {

@@ -87,7 +87,7 @@ PyObject* PyUnicodeUCS2_AsUTF8String(_object* unicode) {
 }
 
 PyObject* PyBool_FromLong(long v) {
-    static auto funcptr = memory::resolveSignature("48 8B 15 11 61 0F 06 4C 8D 05 0A 61 0F 06");
+    static auto funcptr = memory::resolveSignature("48 8B 15 ? ? ? ? 4C 8D 05 ? ? ? ? 85 C9");
     if (funcptr) {
         using FuncType = PyObject*(__fastcall*)(long);
         FuncType func  = reinterpret_cast<FuncType>(funcptr);
@@ -97,7 +97,7 @@ PyObject* PyBool_FromLong(long v) {
 }
 
 PyObject* PyFloat_FromDouble(double v) {
-    static auto funcptr = memory::resolveSignature("48 83 EC 38 48 8B 15 85 3F 4A 07 0F 29 74 24 20");
+    static auto funcptr = memory::resolveSignature("48 83 EC 38 48 8B 15 ? ? ? ? 0F 29 74 24 20");
     if (funcptr) {
         using FuncType = PyObject*(__fastcall*)(double);
         FuncType func  = reinterpret_cast<FuncType>(funcptr);
@@ -151,7 +151,7 @@ PyObject* PyDict_GetItemString(PyObject* dp, const char* key) {
 }
 
 void PyErr_Clear(void) {
-    static auto funcptr = memory::resolveSignature("48 89 5C 24 08 57 48 83 EC 20 48 8B 05 9F 70 47");
+    static auto funcptr = memory::resolveSignature("48 89 5C 24 08 57 48 83 EC 20 48 8B 05 ? ? ? ? 33 D2 48 8B 48 48");
     if (funcptr) {
         using FuncType = void(__fastcall*)();
         FuncType func  = reinterpret_cast<FuncType>(funcptr);
@@ -160,7 +160,9 @@ void PyErr_Clear(void) {
 }
 
 PyObject* Py_BuildValue(const char* format, ...) {
-    static auto funcptr = memory::resolveSignature("48 89 4C 24 08 48 89 54 24 10 4C 89 44 24 18 4C");
+    static auto funcptr = memory::resolveSignature(
+        "48 89 4C 24 08 48 89 54 24 10 4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 48 8D 54 24 38 45 33 C0"
+    );
     if (funcptr) {
         using FuncType = PyObject*(__fastcall*)(const char*, ...);
         FuncType func  = reinterpret_cast<FuncType>(funcptr);
@@ -231,7 +233,9 @@ PyObject* PyEval_EvalCode(PyCodeObject* a, PyObject* b, PyObject* c) {
 }
 
 PyObject* PyModule_GetDict(PyObject* module) {
-    static auto funcptr = memory::resolveSignature("40 53 48 83 EC 20 48 8B D9 48 8D 15 20 A0 0B 06");
+    static auto funcptr = memory::resolveSignature(
+        "40 53 48 83 EC 20 48 8B D9 48 8D 15 ? ? ? ? 48 8B 49 08 48 3B CA 74 20 E8 ? ? ? ? 85 C0"
+    );
     if (funcptr) {
         using FuncType = PyObject*(__fastcall*)(PyObject*);
         FuncType func  = reinterpret_cast<FuncType>(funcptr);

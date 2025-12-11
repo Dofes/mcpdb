@@ -132,6 +132,7 @@ public:
     void clearBreakpoints(const std::string& source);
     bool hasBreakpoint(const std::string& source, int line);
     bool hasBreakpoint(const std::string& source);
+    bool hasBreakpointInCurrentFrame();
 
     // Python 钩子 (使用不透明句柄)
     void onFrameEnter(PyFrameHandle frame);
@@ -140,6 +141,11 @@ public:
 
     // 状态
     DebuggerState getState() const { return state_; }
+
+    bool isRunning() const {
+        DebuggerState s = state_;
+        return s == DebuggerState::Running || s == DebuggerState::Stepping;
+    }
 
 private:
     DAPDebugger();
