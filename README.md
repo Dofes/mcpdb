@@ -12,7 +12,7 @@
                    │ TCP (DAP/JSON)
                    ▼
 ┌─────────────────────────────────────┐
-│        MCPDB (bedrock.dll)          │
+│        MCPDB (mcpdb.dll)          │
 │   DAP Core / Python Wrapper / Hook  │
 └──────────────────┬──────────────────┘
                    │ Hook
@@ -30,12 +30,12 @@
 xmake
 ```
 
-产物：`bedrock.dll` 和 `bedrock-injector.exe`
+产物：`mcpdb.dll` 和 `mcdbg.exe`
 
 ## Usage
 
 1. 启动 `Modpc`
-2. 运行 `bedrock-injector.exe`
+2. 运行 `mcdbg.exe`
 3. VS Code 配置 `launch.json`：
 
 ```jsonc

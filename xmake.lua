@@ -8,7 +8,7 @@ add_requires("detours v4.0.1-xmake.1")
 add_requires("expected-lite v0.8.0")
 add_requires("fmt 10.2.1", {configs = {runtimes = "MD"}}) 
 
-target("bedrock")
+target("mcpdb")
     set_kind("shared")
     add_files("src/**.cpp")
     add_links("Advapi32","user32","comctl32","kernel32","ws2_32","comdlg32","shell32","ole32","oleaut32","uuid")
@@ -31,7 +31,7 @@ target("bedrock")
 
 
 
-target("bedrock-injector")
+target("mcdbg")
     set_kind("binary")
     add_files("src-injector/**.cpp")
     add_links("Advapi32","user32","Shell32")

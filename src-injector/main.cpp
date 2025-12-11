@@ -187,7 +187,7 @@ struct InjectorOptions {
     }
 
     static void printUsage() {
-        std::cout << "用法: bedrock-injector [选项]\n"
+        std::cout << "用法: mcdbg [选项]\n"
                   << "选项:\n"
                   << "  -p, --port <端口>  指定DAP调试器端口 (默认: 5678)\n"
                   << "  -h, --help         显示帮助信息\n";
@@ -210,7 +210,7 @@ int main(int argc, char* argv[]) {
         fs::path exeDir = fs::path(exePath).parent_path();
 
         // 检查 DLL 是否存在（相对于exe路径）
-        fs::path dllPath = exeDir / "bedrock.dll";
+        fs::path dllPath = exeDir / "mcpdb.dll";
         if (!fs::exists(dllPath)) {
             throw std::runtime_error("DLL 文件不存在: " + dllPath.string());
         }
