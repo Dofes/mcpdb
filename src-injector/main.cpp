@@ -169,6 +169,7 @@ static HWND FindMinecraftOGLESWindow() {
 // 命令行参数解析
 struct InjectorOptions {
     uint16_t port = 5678;
+    DWORD    pid  = 0;
     bool     help = false;
 
     static InjectorOptions parse(int argc, char* argv[]) {
@@ -181,6 +182,10 @@ struct InjectorOptions {
                 opts.port = static_cast<uint16_t>(std::stoi(argv[++i]));
             } else if (arg.starts_with("--port=")) {
                 opts.port = static_cast<uint16_t>(std::stoi(arg.substr(7)));
+            } else if (arg == "--pid" && i + 1 < argc) {
+                opts.pid = static_cast<DWORD>(std::stoul(argv[++i]));
+            } else if (arg.starts_with("--pid=")) {
+                opts.pid = static_cast<DWORD>(std::stoul(arg.substr(6)));
             }
         }
         return opts;
@@ -190,6 +195,7 @@ struct InjectorOptions {
         std::cout << "用法: mcdbg [选项]\n"
                   << "选项:\n"
                   << "  -p, --port <端口>  指定DAP调试器端口 (默认: 5678)\n"
+                  << "  --pid <进程ID>     指定目标进程ID (不指定则自动搜索)\n"
                   << "  -h, --help         显示帮助信息\n";
     }
 };
@@ -216,20 +222,32 @@ int main(int argc, char* argv[]) {
         }
         fs::path fullDLLPath = fs::absolute(dllPath);
 
-        std::cout << "等待 Minecraft 窗口...\n";
-        HWND hwnd = nullptr;
-        while ((hwnd = FindMinecraftOGLESWindow()) == nullptr) {
-            Sleep(1000);
-        }
-
         // 获取目标进程 ID
         DWORD processId = 0;
-        GetWindowThreadProcessId(hwnd, &processId);
-        if (processId == 0) {
-            throw std::runtime_error("无法获取目标进程 ID");
-        }
+        if (options.pid != 0) {
+            // 使用指定的 PID
+            processId = options.pid;
+            std::cout << "使用指定进程 ID: " << processId << std::endl;
 
-        std::cout << "目标进程 ID: " << processId << std::endl;
+            // 验证进程是否存在
+            HANDLE hTest = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
+            if (!hTest) {
+                throw std::runtime_error("无法打开指定的进程 ID: " + std::to_string(processId));
+            }
+            CloseHandle(hTest);
+        } else {
+            // 自动搜索 Minecraft 窗口
+            std::cout << "等待 Minecraft 窗口...\n";
+            HWND hwnd = nullptr;
+            while ((hwnd = FindMinecraftOGLESWindow()) == nullptr) {
+                Sleep(1000);
+            }
+            GetWindowThreadProcessId(hwnd, &processId);
+            if (processId == 0) {
+                throw std::runtime_error("无法获取目标进程 ID");
+            }
+            std::cout << "目标进程 ID: " << processId << std::endl;
+        }
 
 
         HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
