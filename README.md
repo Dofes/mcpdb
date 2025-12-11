@@ -43,7 +43,7 @@ xmake
   "name": "Attach to Minecraft",
   "type": "python",
   "request": "attach",
-  "connect": { "host": "127.0.0.1", "port": 5678 }, //由 injector 控制, -p 参数可修改端口
+  "connect": { "host": "127.0.0.1", "port": 5678 }, //由 mcdbg 控制, -p 参数可修改端口
   "pathMappings": [
     {
       "localRoot": "${workspaceFolder}/scripts",
