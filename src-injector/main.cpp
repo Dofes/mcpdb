@@ -166,6 +166,58 @@ static HWND FindMinecraftOGLESWindow() {
     return st.hwnd;
 }
 
+struct FindStateWithPid {
+    HWND  hwnd = nullptr;
+    DWORD pid  = 0;
+};
+
+static HWND FindMinecraftOGLESWindowByPid(DWORD pid) {
+    FindStateWithPid st;
+    st.pid = pid;
+
+    EnumWindows(
+        [](HWND hwnd, LPARAM lParam) -> BOOL {
+            auto* st = reinterpret_cast<FindStateWithPid*>(lParam);
+            if (st->hwnd) return FALSE;
+
+            DWORD windowPid = 0;
+            GetWindowThreadProcessId(hwnd, &windowPid);
+
+            // 只检查匹配PID的窗口
+            if (windowPid != st->pid) {
+                return TRUE;
+            }
+
+            if (ClassIsOGLES(hwnd) && TitleContainsMinecraft(hwnd)) {
+                st->hwnd = hwnd;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&st)
+    );
+    return st.hwnd;
+}
+
+// 检查进程是否为Minecraft（通过模块名判断）
+static bool IsMinecraftProcess(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (!hProcess) return false;
+
+    wchar_t exePath[MAX_PATH]{};
+    DWORD   size   = MAX_PATH;
+    bool    result = false;
+
+    if (QueryFullProcessImageNameW(hProcess, 0, exePath, &size)) {
+        std::wstring path(exePath);
+        // 检查是否包含 Minecraft 相关路径特征
+        result = (path.find(L"Minecraft") != std::wstring::npos || path.find(L"minecraft") != std::wstring::npos);
+    }
+
+    CloseHandle(hProcess);
+    return result;
+}
+
 // 命令行参数解析
 struct InjectorOptions {
     uint16_t port = 5678;
@@ -235,6 +287,22 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error("无法打开指定的进程 ID: " + std::to_string(processId));
             }
             CloseHandle(hTest);
+
+            // 检查是否为 Minecraft 进程
+            if (IsMinecraftProcess(processId)) {
+                std::cout << "检测到 Minecraft 进程，等待窗口初始化...\n";
+                HWND hwnd = nullptr;
+                while ((hwnd = FindMinecraftOGLESWindowByPid(processId)) == nullptr) {
+                    // 检查进程是否仍然存在
+                    HANDLE hCheck = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
+                    if (!hCheck) {
+                        throw std::runtime_error("目标进程已退出");
+                    }
+                    CloseHandle(hCheck);
+                    Sleep(1000);
+                }
+                std::cout << "Minecraft 窗口已就绪\n";
+            }
         } else {
             // 自动搜索 Minecraft 窗口
             std::cout << "等待 Minecraft 窗口...\n";
