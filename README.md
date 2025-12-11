@@ -12,7 +12,7 @@
                    │ TCP (DAP/JSON)
                    ▼
 ┌─────────────────────────────────────┐
-│        MCPDB (mcpdb.dll)          │
+│        MCPDB (mcpdb.dll)            │
 │   DAP Core / Python Wrapper / Hook  │
 └──────────────────┬──────────────────┘
                    │ Hook
