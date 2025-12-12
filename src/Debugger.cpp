@@ -1,4 +1,4 @@
-#include "debugger.h"
+#include "Debugger.h"
 
 #include <fmt/format.h>
 
@@ -8,7 +8,7 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 
-namespace PathUtils {
+namespace path_utils {
 
 // 路径映射表：模块路径 -> 文件系统路径
 static std::unordered_map<std::string, std::string> g_pathMapping;
@@ -144,7 +144,7 @@ bool matches(const std::string& breakpointPath, const std::string& sourcePath) {
     return false;
 }
 
-} // namespace PathUtils
+} // namespace path_utils
 
 std::atomic<int> g_messageSeq{1};
 
@@ -219,35 +219,35 @@ DAPDebugger::~DAPDebugger() {
 }
 
 bool DAPDebugger::initialize(int port) {
-    state_ = DebuggerState::Initializing;
+    mState = DebuggerState::Initializing;
     startServer(port);
     return true;
 }
 
 void DAPDebugger::shutdown() {
-    state_ = DebuggerState::Disconnected;
+    mState = DebuggerState::Disconnected;
     stopServer();
 }
 
 void DAPDebugger::startServer(int port) {
-    if (serverRunning_) return;
+    if (mServerRunning) return;
 
-    serverRunning_ = true;
-    serverStarted_ = false;
+    mServerRunning = true;
+    mServerStarted = false;
 
-    std::unique_lock<std::mutex> startLock(serverStartMutex_);
+    std::unique_lock<std::mutex> startLock(mServerStartMutex);
 
-    serverThread_ = std::thread([this, port]() {
+    mServerThread = std::thread([this, port]() {
         auto notifyStarted = [this](bool success) {
             {
-                std::lock_guard<std::mutex> lock(serverStartMutex_);
-                serverStarted_ = success;
+                std::lock_guard<std::mutex> lock(mServerStartMutex);
+                mServerStarted = success;
             }
-            serverStartCV_.notify_all();
+            mServerStartCv.notify_all();
         };
 
-        serverSocket_ = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
-        if (serverSocket_ < 0) {
+        mServerSocket = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
+        if (mServerSocket < 0) {
             std::cerr << "[DAP] Failed to create socket" << std::endl;
             std::cerr.flush();
             notifyStarted(false);
@@ -255,42 +255,42 @@ void DAPDebugger::startServer(int port) {
         }
 
         int opt = 1;
-        setsockopt(serverSocket_, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+        setsockopt(mServerSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port        = htons(static_cast<u_short>(port));
 
-        if (bind(serverSocket_, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        if (bind(mServerSocket, (sockaddr*)&addr, sizeof(addr)) < 0) {
             std::cerr << "[DAP] Failed to bind to port " << port << std::endl;
             std::cerr.flush();
-            closesocket(serverSocket_);
+            closesocket(mServerSocket);
             notifyStarted(false);
             return;
         }
 
-        listen(serverSocket_, 1);
+        listen(mServerSocket, 1);
         std::cout << "[DAP] Debug adapter listening on port " << port << std::endl;
         std::cout.flush();
         notifyStarted(true);
 
-        while (serverRunning_) {
+        while (mServerRunning) {
             sockaddr_in clientAddr{};
             socklen_t   clientLen = sizeof(clientAddr);
-            clientSocket_         = static_cast<int>(accept(serverSocket_, (sockaddr*)&clientAddr, &clientLen));
+            mClientSocket         = static_cast<int>(accept(mServerSocket, (sockaddr*)&clientAddr, &clientLen));
 
-            if (clientSocket_ < 0) continue;
+            if (mClientSocket < 0) continue;
 
             std::cout << "[DAP] Client connected" << std::endl;
             std::cout.flush();
-            state_ = DebuggerState::Initializing;
+            mState = DebuggerState::Initializing;
 
             char        buffer[65536];
             std::string messageBuffer;
 
-            while (serverRunning_ && clientSocket_ >= 0) {
-                int received = recv(clientSocket_, buffer, sizeof(buffer) - 1, 0);
+            while (mServerRunning && mClientSocket >= 0) {
+                int received = recv(mClientSocket, buffer, sizeof(buffer) - 1, 0);
                 if (received <= 0) break;
 
                 buffer[received]  = '\0';
@@ -327,37 +327,37 @@ void DAPDebugger::startServer(int port) {
 
             std::cout << "[DAP] Client disconnected" << std::endl;
             std::cout.flush();
-            closesocket(clientSocket_);
-            clientSocket_ = -1;
+            closesocket(mClientSocket);
+            mClientSocket = -1;
         }
     });
 
     // 等待服务器启动完成
-    serverStartCV_.wait(startLock, [this] { return serverStarted_.load() || !serverRunning_.load(); });
+    mServerStartCv.wait(startLock, [this] { return mServerStarted.load() || !mServerRunning.load(); });
 }
 
 void DAPDebugger::stopServer() {
-    serverRunning_ = false;
-    if (clientSocket_ >= 0) {
-        closesocket(clientSocket_);
-        clientSocket_ = -1;
+    mServerRunning = false;
+    if (mClientSocket >= 0) {
+        closesocket(mClientSocket);
+        mClientSocket = -1;
     }
-    if (serverSocket_ >= 0) {
-        closesocket(serverSocket_);
-        serverSocket_ = -1;
+    if (mServerSocket >= 0) {
+        closesocket(mServerSocket);
+        mServerSocket = -1;
     }
-    if (serverThread_.joinable()) {
-        serverThread_.join();
+    if (mServerThread.joinable()) {
+        mServerThread.join();
     }
 }
 
 void DAPDebugger::sendMessage(const json& message) { sendRaw(message.dump()); }
 
 void DAPDebugger::sendRaw(const std::string& message) const {
-    if (clientSocket_ < 0) return;
+    if (mClientSocket < 0) return;
 
     std::string packet = fmt::format("Content-Length: {}\r\n\r\n{}", message.size(), message);
-    send(clientSocket_, packet.c_str(), static_cast<int>(packet.size()), 0);
+    send(mClientSocket, packet.c_str(), static_cast<int>(packet.size()), 0);
 }
 
 
@@ -456,12 +456,12 @@ void DAPDebugger::processInitialize(int seq, const json& /*args*/) {
 
 void DAPDebugger::processLaunch(int seq, const json& /*args*/) {
     sendMessage(DAPMessageBuilder::response(seq, "launch", true));
-    state_ = DebuggerState::Running;
+    mState = DebuggerState::Running;
 }
 
 void DAPDebugger::processAttach(int seq, const json& /*args*/) {
     sendMessage(DAPMessageBuilder::response(seq, "attach", true));
-    state_ = DebuggerState::Running;
+    mState = DebuggerState::Running;
 }
 
 void DAPDebugger::processSetBreakpoints(int seq, const json& args) {
@@ -502,7 +502,7 @@ void DAPDebugger::processSetBreakpoints(int seq, const json& args) {
 
 void DAPDebugger::processConfigurationDone(int seq, const json& /*args*/) {
     sendMessage(DAPMessageBuilder::response(seq, "configurationDone", true));
-    state_ = DebuggerState::Running;
+    mState = DebuggerState::Running;
     notifyCommandReceived();
 }
 
@@ -525,10 +525,10 @@ void DAPDebugger::processThreads(int seq, const json& /*args*/) {
 }
 
 void DAPDebugger::processStackTrace(int seq, const json& /*args*/) {
-    std::lock_guard<std::mutex> lock(frameMutex_);
+    std::lock_guard<std::mutex> lock(mFrameMutex);
 
     json frames = json::array();
-    for (const auto& frame : stackFrames_) {
+    for (const auto& frame : mStackFrames) {
         frames.push_back(frame.toJson());
     }
 
@@ -539,7 +539,7 @@ void DAPDebugger::processStackTrace(int seq, const json& /*args*/) {
             true,
             {
                 {"stackFrames",              frames},
-                {"totalFrames", stackFrames_.size()}
+                {"totalFrames", mStackFrames.size()}
     }
         )
     );
@@ -548,11 +548,11 @@ void DAPDebugger::processStackTrace(int seq, const json& /*args*/) {
 void DAPDebugger::processScopes(int seq, const json& args) {
     int frameId = args.value("frameId", 0);
 
-    int localsRef  = nextVarRef_++;
-    int globalsRef = nextVarRef_++;
+    int localsRef  = mNextVarRef++;
+    int globalsRef = mNextVarRef++;
 
-    variableRefs_[localsRef]  = {VariableRefType::Locals, frameId, nullptr};
-    variableRefs_[globalsRef] = {VariableRefType::Globals, frameId, nullptr};
+    mVariableRefs[localsRef]  = {VariableRefType::Locals, frameId, nullptr};
+    mVariableRefs[globalsRef] = {VariableRefType::Globals, frameId, nullptr};
 
     json scopes = json::array();
     scopes.push_back({
@@ -585,9 +585,9 @@ void DAPDebugger::processVariables(int seq, const json& args) {
 
     VariableRef ref;
     {
-        std::lock_guard<std::mutex> lock(frameMutex_);
-        auto                        it = variableRefs_.find(varRef);
-        if (it == variableRefs_.end()) {
+        std::lock_guard<std::mutex> lock(mFrameMutex);
+        auto                        it = mVariableRefs.find(varRef);
+        if (it == mVariableRefs.end()) {
             sendMessage(
                 DAPMessageBuilder::response(
                     seq,
@@ -605,7 +605,7 @@ void DAPDebugger::processVariables(int seq, const json& args) {
 
     // Locals/Globals 只在 Stopped 状态可用
     if ((ref.type == VariableRefType::Locals || ref.type == VariableRefType::Globals)
-        && state_ != DebuggerState::Stopped) {
+        && mState != DebuggerState::Stopped) {
         sendMessage(
             DAPMessageBuilder::response(
                 seq,
@@ -619,22 +619,22 @@ void DAPDebugger::processVariables(int seq, const json& args) {
         return;
     }
 
-    if (state_ == DebuggerState::Stopped) {
+    if (mState == DebuggerState::Stopped) {
         // 提交任务到主线程执行
         auto completion = std::make_shared<std::promise<void>>();
         auto future     = completion->get_future();
 
         {
-            std::lock_guard<std::mutex> lock(taskQueueMutex_);
-            taskQueue_.push(
+            std::lock_guard<std::mutex> lock(mTaskQueueMutex);
+            mTaskQueue.push(
                 {[this, &ref, &variables]() {
                      switch (ref.type) {
                      case VariableRefType::Locals:
                      case VariableRefType::Globals: {
                          PyFrameHandle frame = nullptr;
                          {
-                             std::lock_guard<std::mutex> flock(frameMutex_);
-                             for (const auto& sf : stackFrames_) {
+                             std::lock_guard<std::mutex> flock(mFrameMutex);
+                             for (const auto& sf : mStackFrames) {
                                  if (sf.id == ref.frameId) {
                                      frame = sf.pyFrame;
                                      break;
@@ -687,7 +687,7 @@ void DAPDebugger::processVariables(int seq, const json& args) {
                  completion}
             );
         }
-        taskQueueCV_.notify_one();
+        mTaskQueueCv.notify_one();
         future.wait();
     } else {
         // Running 状态，Object 类型需要获取 GIL
@@ -728,18 +728,18 @@ void DAPDebugger::processVariables(int seq, const json& args) {
 }
 
 void DAPDebugger::clearVariableReferences() {
-    for (auto& [id, ref] : variableRefs_) {
+    for (auto& [id, ref] : mVariableRefs) {
         if (ref.type == VariableRefType::Object && ref.object) {
             py::xdecref(ref.object);
         }
     }
-    variableRefs_.clear();
-    nextVarRef_ = 1;
+    mVariableRefs.clear();
+    mNextVarRef = 1;
 }
 
 void DAPDebugger::processContinue(int seq, const json& /*args*/) {
-    stepMode_ = StepMode::None;
-    state_    = DebuggerState::Running;
+    mStepMode = StepMode::None;
+    mState    = DebuggerState::Running;
     clearVariableReferences();
     sendMessage(
         DAPMessageBuilder::response(
@@ -755,10 +755,10 @@ void DAPDebugger::processContinue(int seq, const json& /*args*/) {
 }
 
 void DAPDebugger::processNext(int seq, const json& /*args*/) {
-    stepMode_       = StepMode::Over;
-    stepStartFrame_ = currentFrame_;
-    stepDepth_      = py::calculateFrameDepth(currentFrame_);
-    state_          = DebuggerState::Stepping;
+    mStepMode       = StepMode::Over;
+    mStepStartFrame = mCurrentFrame;
+    mStepDepth      = py::calculateFrameDepth(mCurrentFrame);
+    mState          = DebuggerState::Stepping;
     clearVariableReferences();
 
     sendMessage(DAPMessageBuilder::response(seq, "next", true));
@@ -766,9 +766,9 @@ void DAPDebugger::processNext(int seq, const json& /*args*/) {
 }
 
 void DAPDebugger::processStepIn(int seq, const json& /*args*/) {
-    stepMode_       = StepMode::Into;
-    stepStartFrame_ = currentFrame_;
-    state_          = DebuggerState::Stepping;
+    mStepMode       = StepMode::Into;
+    mStepStartFrame = mCurrentFrame;
+    mState          = DebuggerState::Stepping;
     clearVariableReferences();
 
     sendMessage(DAPMessageBuilder::response(seq, "stepIn", true));
@@ -776,10 +776,10 @@ void DAPDebugger::processStepIn(int seq, const json& /*args*/) {
 }
 
 void DAPDebugger::processStepOut(int seq, const json& /*args*/) {
-    stepMode_       = StepMode::Out;
-    stepStartFrame_ = currentFrame_;
-    stepDepth_      = py::calculateFrameDepth(currentFrame_);
-    state_          = DebuggerState::Stepping;
+    mStepMode       = StepMode::Out;
+    mStepStartFrame = mCurrentFrame;
+    mStepDepth      = py::calculateFrameDepth(mCurrentFrame);
+    mState          = DebuggerState::Stepping;
     clearVariableReferences();
 
     sendMessage(DAPMessageBuilder::response(seq, "stepOut", true));
@@ -787,7 +787,7 @@ void DAPDebugger::processStepOut(int seq, const json& /*args*/) {
 }
 
 void DAPDebugger::processPause(int seq, const json& /*args*/) {
-    state_ = DebuggerState::Stopped;
+    mState = DebuggerState::Stopped;
     sendMessage(DAPMessageBuilder::response(seq, "pause", true));
 }
 
@@ -817,7 +817,7 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
     bool        isError = false;
 
     // 如果调试器已暂停，提交任务到主线程执行
-    if (state_ == DebuggerState::Stopped) {
+    if (mState == DebuggerState::Stopped) {
         // 创建完成通知
         auto completion = std::make_shared<std::promise<void>>();
         auto future     = completion->get_future();
@@ -825,11 +825,11 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
         // 获取 frame（在当前线程安全获取）
         PyFrameHandle frame = nullptr;
         {
-            std::lock_guard<std::mutex> lock(frameMutex_);
+            std::lock_guard<std::mutex> lock(mFrameMutex);
 
             if (args.contains("frameId")) {
                 int frameId = args["frameId"].get<int>();
-                for (const auto& sf : stackFrames_) {
+                for (const auto& sf : mStackFrames) {
                     if (sf.id == frameId) {
                         frame = sf.pyFrame;
                         break;
@@ -838,10 +838,10 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
             }
 
             if (!frame) {
-                if (currentFrame_) {
-                    frame = currentFrame_;
-                } else if (!stackFrames_.empty()) {
-                    frame = stackFrames_.front().pyFrame;
+                if (mCurrentFrame) {
+                    frame = mCurrentFrame;
+                } else if (!mStackFrames.empty()) {
+                    frame = mStackFrames.front().pyFrame;
                 }
             }
         }
@@ -863,8 +863,8 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
 
         // 提交任务到主线程
         {
-            std::lock_guard<std::mutex> lock(taskQueueMutex_);
-            taskQueue_.push(
+            std::lock_guard<std::mutex> lock(mTaskQueueMutex);
+            mTaskQueue.push(
                 {[this, frame, expression, isRepl, &result, &type, &varRef, &isError]() {
                      // 这个 lambda 在主线程执行
                      py::frameToLocals(frame);
@@ -894,7 +894,7 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
                          }
 
                          if (value) {
-                             result = py::getRepr(value, dap::kMaxEvalResultLength);
+                             result = py::getRepr(value, dap::MaxEvalResultLength);
                              type   = py::getTypeName(value);
                              if (py::isExpandable(value)) {
                                  py::incref(value);
@@ -905,7 +905,7 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
                              if (code) {
                                  py::ObjectGuard evalResult(py::evalCode(code.get(), globals, locals));
                                  if (evalResult) {
-                                     result = py::getRepr(evalResult.get(), dap::kMaxEvalResultLength);
+                                     result = py::getRepr(evalResult.get(), dap::MaxEvalResultLength);
                                      type   = py::getTypeName(evalResult.get());
                                      if (py::isExpandable(evalResult.get())) {
                                          varRef = registerVariableReference(evalResult.release());
@@ -922,7 +922,7 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
                  completion}
             );
         }
-        taskQueueCV_.notify_one();
+        mTaskQueueCv.notify_one();
 
         // 等待主线程执行完毕
         future.wait();
@@ -949,7 +949,7 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
                 PyHandle value = py::dictGetItemString(globals, expression.c_str());
 
                 if (value) {
-                    result = py::getRepr(value, dap::kMaxEvalResultLength);
+                    result = py::getRepr(value, dap::MaxEvalResultLength);
                     type   = py::getTypeName(value);
                     if (py::isExpandable(value)) {
                         py::incref(value);
@@ -960,7 +960,7 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
                     if (code) {
                         py::ObjectGuard evalResult(py::evalCode(code.get(), globals, globals));
                         if (evalResult) {
-                            result = py::getRepr(evalResult.get(), dap::kMaxEvalResultLength);
+                            result = py::getRepr(evalResult.get(), dap::MaxEvalResultLength);
                             type   = py::getTypeName(evalResult.get());
                             if (py::isExpandable(evalResult.get())) {
                                 varRef = registerVariableReference(evalResult.release());
@@ -1024,7 +1024,7 @@ void DAPDebugger::processSetVariable(int seq, const json& args) {
     std::string name   = args.value("name", "");
     std::string value  = args.value("value", "");
 
-    if (state_ != DebuggerState::Stopped) {
+    if (mState != DebuggerState::Stopped) {
         sendMessage(
             DAPMessageBuilder::response(
                 seq,
@@ -1051,13 +1051,13 @@ void DAPDebugger::processSetVariable(int seq, const json& args) {
 
     // 提交任务到主线程执行
     {
-        std::lock_guard<std::mutex> lock(taskQueueMutex_);
-        taskQueue_.push(
+        std::lock_guard<std::mutex> lock(mTaskQueueMutex);
+        mTaskQueue.push(
             {[this, varRef, name, value, &success, &errorMsg, &resultStr, &typeStr, &newVarRef]() {
-                 std::lock_guard<std::mutex> frameLock(frameMutex_);
+                 std::lock_guard<std::mutex> frameLock(mFrameMutex);
 
-                 auto it = variableRefs_.find(varRef);
-                 if (it == variableRefs_.end()) {
+                 auto it = mVariableRefs.find(varRef);
+                 if (it == mVariableRefs.end()) {
                      errorMsg = "Invalid variable reference.";
                      return;
                  }
@@ -1070,7 +1070,7 @@ void DAPDebugger::processSetVariable(int seq, const json& args) {
                  switch (ref.type) {
                  case VariableRefType::Locals:
                  case VariableRefType::Globals: {
-                     for (const auto& sf : stackFrames_) {
+                     for (const auto& sf : mStackFrames) {
                          if (sf.id == ref.frameId) {
                              frame = sf.pyFrame;
                              break;
@@ -1131,7 +1131,7 @@ void DAPDebugger::processSetVariable(int seq, const json& args) {
                  }
 
                  // 返回新值信息
-                 resultStr = py::getRepr(newValue.get(), dap::kMaxEvalResultLength);
+                 resultStr = py::getRepr(newValue.get(), dap::MaxEvalResultLength);
                  typeStr   = py::getTypeName(newValue.get());
 
                  if (py::isExpandable(newValue.get())) {
@@ -1143,7 +1143,7 @@ void DAPDebugger::processSetVariable(int seq, const json& args) {
              completion}
         );
     }
-    taskQueueCV_.notify_one();
+    mTaskQueueCv.notify_one();
 
     // 等待任务完成
     future.wait();
@@ -1209,17 +1209,17 @@ void DAPDebugger::processCompletions(int seq, const json& args) {
         replaceStart        = static_cast<int>(dotPos + 1);
         replaceLength       = static_cast<int>(completionPrefix.size());
 
-        if (state_ == DebuggerState::Stopped) {
+        if (mState == DebuggerState::Stopped) {
             PyFrameHandle frame   = nullptr;
             PyHandle      globals = nullptr;
             PyHandle      locals  = nullptr;
 
             {
-                std::lock_guard<std::mutex> lock(frameMutex_);
-                if (currentFrame_) {
-                    frame = currentFrame_;
-                } else if (!stackFrames_.empty()) {
-                    frame = stackFrames_.front().pyFrame;
+                std::lock_guard<std::mutex> lock(mFrameMutex);
+                if (mCurrentFrame) {
+                    frame = mCurrentFrame;
+                } else if (!mStackFrames.empty()) {
+                    frame = mStackFrames.front().pyFrame;
                 }
             }
 
@@ -1352,13 +1352,13 @@ void DAPDebugger::processCompletions(int seq, const json& args) {
             py::clearError();
         };
 
-        if (state_ == DebuggerState::Stopped) {
-            std::lock_guard<std::mutex> lock(frameMutex_);
+        if (mState == DebuggerState::Stopped) {
+            std::lock_guard<std::mutex> lock(mFrameMutex);
             PyFrameHandle               frame = nullptr;
-            if (currentFrame_) {
-                frame = currentFrame_;
-            } else if (!stackFrames_.empty()) {
-                frame = stackFrames_.front().pyFrame;
+            if (mCurrentFrame) {
+                frame = mCurrentFrame;
+            } else if (!mStackFrames.empty()) {
+                frame = mStackFrames.front().pyFrame;
             }
 
             int sortIndex = 0;
@@ -1464,38 +1464,38 @@ void DAPDebugger::processCompletions(int seq, const json& args) {
 
 void DAPDebugger::processDisconnect(int seq, const json& /*args*/) {
     sendMessage(DAPMessageBuilder::response(seq, "disconnect", true));
-    state_ = DebuggerState::Terminated;
+    mState = DebuggerState::Terminated;
     notifyCommandReceived();
 }
 
 int DAPDebugger::setBreakpoint(const std::string& source, int line, const std::string& condition) {
-    PathUtils::registerPathMapping(source);
+    path_utils::registerPathMapping(source);
 
-    std::lock_guard<std::mutex> lock(breakpointMutex_);
+    std::lock_guard<std::mutex> lock(mBreakpointMutex);
 
     Breakpoint bp;
-    bp.id        = nextBreakpointId_++;
+    bp.id        = mNextBreakpointId++;
     bp.source    = source;
     bp.line      = line;
     bp.verified  = true;
     bp.condition = condition;
 
-    breakpoints_[source].push_back(bp);
+    mBreakpoints[source].push_back(bp);
 
     std::cout << "[DAP] Breakpoint " << bp.id << " set at " << source << ":" << line << std::endl;
     return bp.id;
 }
 
 void DAPDebugger::clearBreakpoints(const std::string& source) {
-    std::lock_guard<std::mutex> lock(breakpointMutex_);
-    breakpoints_[source].clear();
+    std::lock_guard<std::mutex> lock(mBreakpointMutex);
+    mBreakpoints[source].clear();
 }
 
 bool DAPDebugger::hasBreakpoint(const std::string& source, int line) {
-    std::lock_guard<std::mutex> lock(breakpointMutex_);
+    std::lock_guard<std::mutex> lock(mBreakpointMutex);
 
-    for (const auto& [bpSource, bpList] : breakpoints_) {
-        if (PathUtils::matches(bpSource, source)) {
+    for (const auto& [bpSource, bpList] : mBreakpoints) {
+        if (path_utils::matches(bpSource, source)) {
             for (const auto& bp : bpList) {
                 if (bp.line == line) return true;
             }
@@ -1505,21 +1505,21 @@ bool DAPDebugger::hasBreakpoint(const std::string& source, int line) {
 }
 
 bool DAPDebugger::hasBreakpoint(const std::string& source) {
-    std::lock_guard<std::mutex> lock(breakpointMutex_);
+    std::lock_guard<std::mutex> lock(mBreakpointMutex);
 
-    for (const auto& [bpSource, bpList] : breakpoints_) {
-        if (PathUtils::matches(bpSource, source)) {
+    for (const auto& [bpSource, bpList] : mBreakpoints) {
+        if (path_utils::matches(bpSource, source)) {
             if (!bpList.empty()) return true;
         }
     }
     return false;
 }
 
-bool DAPDebugger::hasBreakpointInCurrentFrame() { return hasBreakpoint(cachedFilename_); }
+bool DAPDebugger::hasBreakpointInCurrentFrame() { return hasBreakpoint(mCachedFilename); }
 
 int DAPDebugger::registerVariableReference(PyHandle obj) {
-    int ref            = nextVarRef_++;
-    variableRefs_[ref] = {VariableRefType::Object, 0, obj};
+    int ref            = mNextVarRef++;
+    mVariableRefs[ref] = {VariableRefType::Object, 0, obj};
     return ref;
 }
 
@@ -1548,7 +1548,7 @@ json DAPDebugger::getVariablesFromDict(PyHandle dict) {
     PyHandle  value     = nullptr;
     int       count     = 0;
 
-    while (py::dictNext(dict, &pos, &key, &value) && count < dap::kMaxVariables) {
+    while (py::dictNext(dict, &pos, &key, &value) && count < dap::MaxVariables) {
         std::string keyStr;
         if (py::isString(key)) {
             keyStr = py::asString(key);
@@ -1566,7 +1566,7 @@ json DAPDebugger::getVariablesFromList(PyHandle list) {
     json      variables = json::array();
     long long size      = py::listSize(list);
 
-    for (long long i = 0; i < size && i < dap::kMaxVariables; i++) {
+    for (long long i = 0; i < size && i < dap::MaxVariables; i++) {
         PyHandle item = py::listGetItem(list, i);
         variables.push_back(extractVariable(fmt::format("[{}]", i), item));
     }
@@ -1577,7 +1577,7 @@ json DAPDebugger::getVariablesFromTuple(PyHandle tuple) {
     json      variables = json::array();
     long long size      = py::tupleSize(tuple);
 
-    for (long long i = 0; i < size && i < dap::kMaxVariables; i++) {
+    for (long long i = 0; i < size && i < dap::MaxVariables; i++) {
         PyHandle item = py::tupleGetItem(tuple, i);
         variables.push_back(extractVariable(fmt::format("[{}]", i), item));
     }
@@ -1590,7 +1590,7 @@ json DAPDebugger::getVariablesFromSet(PyHandle set) {
     PyHandle  key       = nullptr;
     int       index     = 0;
 
-    while (py::setNext(set, &pos, &key) && index < dap::kMaxVariables) {
+    while (py::setNext(set, &pos, &key) && index < dap::MaxVariables) {
         std::string name = fmt::format("{}", reinterpret_cast<uintptr_t>(key));
         variables.push_back(extractVariable(name, key));
         ++index;
@@ -1617,7 +1617,7 @@ json DAPDebugger::getVariablesFromObject(PyHandle obj) {
     long long size  = py::listSize(dirList.get());
     int       count = 0;
 
-    for (long long i = 0; i < size && count < dap::kMaxVariables; i++) {
+    for (long long i = 0; i < size && count < dap::MaxVariables; i++) {
         PyHandle attrName = py::listGetItem(dirList.get(), i);
         if (!attrName || !py::isString(attrName)) continue;
 
@@ -1654,20 +1654,20 @@ void DAPDebugger::waitForCommand() { debuggerLoop(); }
 
 void DAPDebugger::debuggerLoop() {
     // 主线程在断点处调用此函数，循环处理来自调试器线程的任务
-    shouldContinue_ = false;
+    mShouldContinue = false;
 
-    while (!shouldContinue_.load()) {
-        std::unique_lock<std::mutex> lock(taskQueueMutex_);
+    while (!mShouldContinue.load()) {
+        std::unique_lock<std::mutex> lock(mTaskQueueMutex);
 
-        taskQueueCV_.wait(lock, [this] { return !taskQueue_.empty() || shouldContinue_.load(); });
+        mTaskQueueCv.wait(lock, [this] { return !mTaskQueue.empty() || mShouldContinue.load(); });
 
-        if (shouldContinue_.load()) {
+        if (mShouldContinue.load()) {
             break;
         }
 
-        if (!taskQueue_.empty()) {
-            auto pendingTask = std::move(taskQueue_.front());
-            taskQueue_.pop();
+        if (!mTaskQueue.empty()) {
+            auto pendingTask = std::move(mTaskQueue.front());
+            mTaskQueue.pop();
             lock.unlock();
 
             pendingTask.task();
@@ -1681,29 +1681,29 @@ void DAPDebugger::debuggerLoop() {
 
 void DAPDebugger::notifyCommandReceived() {
     // 设置继续标志并唤醒主线程
-    shouldContinue_ = true;
-    taskQueueCV_.notify_all();
+    mShouldContinue = true;
+    mTaskQueueCv.notify_all();
 }
 
 void DAPDebugger::onFrameEnter(PyFrameHandle frame) {
-    cachedFrame_       = frame;
+    mCachedFrame       = frame;
     py::FrameInfo info = py::getFrameInfo(frame);
-    cachedFilename_    = info.filename;
+    mCachedFilename    = info.filename;
 }
 
 void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
-    if (state_ == DebuggerState::Terminated || state_ == DebuggerState::Disconnected) {
+    if (mState == DebuggerState::Terminated || mState == DebuggerState::Disconnected) {
         return;
     }
 
     std::string source;
-    if (frame == cachedFrame_) {
-        source = cachedFilename_;
+    if (frame == mCachedFrame) {
+        source = mCachedFilename;
     } else {
         py::FrameInfo info = py::getFrameInfo(frame);
         source             = info.filename;
-        cachedFrame_       = frame;
-        cachedFilename_    = source;
+        mCachedFrame       = frame;
+        mCachedFilename    = source;
     }
 
     bool        shouldStop = false;
@@ -1714,22 +1714,22 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
         stopReason = "breakpoint";
     }
 
-    if (state_ == DebuggerState::Stepping) {
+    if (mState == DebuggerState::Stepping) {
         int currentDepth = py::calculateFrameDepth(frame);
 
-        switch (stepMode_) {
+        switch (mStepMode) {
         case StepMode::Into:
             shouldStop = true;
             stopReason = "step";
             break;
         case StepMode::Over:
-            if (currentDepth <= stepDepth_) {
+            if (currentDepth <= mStepDepth) {
                 shouldStop = true;
                 stopReason = "step";
             }
             break;
         case StepMode::Out:
-            if (currentDepth < stepDepth_) {
+            if (currentDepth < mStepDepth) {
                 shouldStop = true;
                 stopReason = "step";
             }
@@ -1742,35 +1742,35 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
     if (!shouldStop) return;
 
     // 停止执行
-    state_         = DebuggerState::Stopped;
-    currentFrame_  = frame;
-    currentLine_   = line;
-    currentSource_ = source;
-    stepMode_      = StepMode::None;
+    mState         = DebuggerState::Stopped;
+    mCurrentFrame  = frame;
+    mCurrentLine   = line;
+    mCurrentSource = source;
+    mStepMode      = StepMode::None;
 
     // 清除旧的变量引用
     clearVariableReferences();
 
     // 构建堆栈帧
     {
-        std::lock_guard<std::mutex> lock(frameMutex_);
-        stackFrames_.clear();
+        std::lock_guard<std::mutex> lock(mFrameMutex);
+        mStackFrames.clear();
 
         PyFrameHandle f   = frame;
         int           idx = 0;
-        while (f && idx < dap::kMaxStackFrames) {
+        while (f && idx < dap::MaxStackFrames) {
             py::FrameInfo finfo = py::getFrameInfo(f);
 
             StackFrame sf;
-            sf.id      = nextFrameId_++;
+            sf.id      = mNextFrameId++;
             sf.pyFrame = f;
             sf.line    = finfo.lineNumber;
             sf.column  = 1;
             sf.name    = finfo.funcName;
             // 将模块路径转换为文件系统路径，以便 VSCode 能正确打开源文件
-            sf.source = PathUtils::resolveToFilePath(finfo.filename);
+            sf.source = path_utils::resolveToFilePath(finfo.filename);
 
-            stackFrames_.push_back(sf);
+            mStackFrames.push_back(sf);
             f = finfo.back;
             idx++;
         }
@@ -1795,9 +1795,9 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
 }
 
 void DAPDebugger::onFrameExit(PyFrameHandle frame) {
-    if (frame == cachedFrame_) {
-        cachedFrame_ = nullptr;
-        cachedFilename_.clear();
+    if (frame == mCachedFrame) {
+        mCachedFrame = nullptr;
+        mCachedFilename.clear();
     }
 }
 

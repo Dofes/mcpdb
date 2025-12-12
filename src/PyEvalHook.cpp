@@ -1,4 +1,4 @@
-#include "debugger.h"
+#include "Debugger.h"
 
 #include "api/memory/Hook.h"
 #include "api/memory/Memory.h"

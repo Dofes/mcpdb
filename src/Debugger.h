@@ -1,6 +1,6 @@
 #pragma once
 
-#include "py_wrapper.h"
+#include "PyWrapper.h"
 
 #include <nlohmann/json.hpp>
 
@@ -19,11 +19,11 @@ using json = nlohmann::json;
 
 namespace dap {
 
-constexpr int kDefaultPort         = 5678;
-constexpr int kMaxStackFrames      = 50;
-constexpr int kMaxVariables        = 100;
-constexpr int kMaxValueLength      = 200;
-constexpr int kMaxEvalResultLength = 500;
+constexpr int DefaultPort         = 5678;
+constexpr int MaxStackFrames      = 50;
+constexpr int MaxVariables        = 100;
+constexpr int MaxValueLength      = 200;
+constexpr int MaxEvalResultLength = 500;
 
 } // namespace dap
 
@@ -91,7 +91,7 @@ enum class DebuggerState { Disconnected, Initializing, Running, Stopped, Steppin
 
 enum class StepMode { None, Over, Into, Out };
 
-namespace PathUtils {
+namespace path_utils {
 
 std::string normalize(const std::string& path);
 bool        matches(const std::string& breakpointPath, const std::string& sourcePath);
@@ -100,7 +100,7 @@ void        registerPathMapping(const std::string& filePath);
 std::string resolveToFilePath(const std::string& sourcePath);
 void        clearPathMapping();
 
-} // namespace PathUtils
+} // namespace path_utils
 
 class DAPMessageBuilder {
 public:
@@ -116,7 +116,7 @@ class DAPDebugger {
 public:
     static DAPDebugger& getInstance();
 
-    bool initialize(int port = dap::kDefaultPort);
+    bool initialize(int port = dap::DefaultPort);
     void shutdown();
 
     void handleRequest(const std::string& request);
@@ -132,10 +132,10 @@ public:
     void onLineExecute(PyFrameHandle frame, int line);
     void onFrameExit(PyFrameHandle frame);
 
-    DebuggerState getState() const { return state_; }
+    DebuggerState getState() const { return mState; }
 
     bool isRunning() const {
-        DebuggerState s = state_;
+        DebuggerState s = mState;
         return s == DebuggerState::Running || s == DebuggerState::Stepping;
     }
 
@@ -194,60 +194,60 @@ private:
     auto submitToMainThread(F&& func) -> decltype(func());
 
     // 状态
-    std::atomic<DebuggerState> state_{DebuggerState::Disconnected};
+    std::atomic<DebuggerState> mState{DebuggerState::Disconnected};
 
     // 断点
-    std::unordered_map<std::string, std::vector<Breakpoint>> breakpoints_;
-    std::mutex                                               breakpointMutex_;
-    int                                                      nextBreakpointId_ = 1;
+    std::unordered_map<std::string, std::vector<Breakpoint>> mBreakpoints;
+    std::mutex                                               mBreakpointMutex;
+    int                                                      mNextBreakpointId = 1;
 
     // 堆栈帧
-    std::vector<StackFrame> stackFrames_;
-    std::mutex              frameMutex_;
-    int                     nextFrameId_ = 1;
+    std::vector<StackFrame> mStackFrames;
+    std::mutex              mFrameMutex;
+    int                     mNextFrameId = 1;
 
     // 变量引用
-    std::unordered_map<int, VariableRef> variableRefs_;
-    int                                  nextVarRef_ = 1;
+    std::unordered_map<int, VariableRef> mVariableRefs;
+    int                                  mNextVarRef = 1;
 
     // 当前状态
-    PyFrameHandle currentFrame_ = nullptr;
-    int           currentLine_  = 0;
-    std::string   currentSource_;
+    PyFrameHandle mCurrentFrame = nullptr;
+    int           mCurrentLine  = 0;
+    std::string   mCurrentSource;
 
-    PyFrameHandle cachedFrame_ = nullptr;
-    std::string   cachedFilename_;
+    PyFrameHandle mCachedFrame = nullptr;
+    std::string   mCachedFilename;
 
     // 单步状态
-    StepMode      stepMode_       = StepMode::None;
-    int           stepDepth_      = 0;
-    PyFrameHandle stepStartFrame_ = nullptr;
+    StepMode      mStepMode       = StepMode::None;
+    int           mStepDepth      = 0;
+    PyFrameHandle mStepStartFrame = nullptr;
 
     // 网络
-    int               serverSocket_ = -1;
-    int               clientSocket_ = -1;
-    std::thread       serverThread_;
-    std::atomic<bool> serverRunning_{false};
+    int               mServerSocket = -1;
+    int               mClientSocket = -1;
+    std::thread       mServerThread;
+    std::atomic<bool> mServerRunning{false};
 
     // 命令同步
-    std::mutex              commandMutex_;
-    std::condition_variable commandCV_;
-    std::atomic<bool>       commandReceived_{false};
+    std::mutex              mCommandMutex;
+    std::condition_variable mCommandCv;
+    std::atomic<bool>       mCommandReceived{false};
 
     // 主线程任务队列
     struct PendingTask {
         std::function<void()>               task;
         std::shared_ptr<std::promise<void>> completion;
     };
-    std::queue<PendingTask> taskQueue_;
-    std::mutex              taskQueueMutex_;
-    std::condition_variable taskQueueCV_;
-    std::atomic<bool>       shouldContinue_{false};
+    std::queue<PendingTask> mTaskQueue;
+    std::mutex              mTaskQueueMutex;
+    std::condition_variable mTaskQueueCv;
+    std::atomic<bool>       mShouldContinue{false};
 
     // 服务器启动同步
-    std::mutex              serverStartMutex_;
-    std::condition_variable serverStartCV_;
-    std::atomic<bool>       serverStarted_{false};
+    std::mutex              mServerStartMutex;
+    std::condition_variable mServerStartCv;
+    std::atomic<bool>       mServerStarted{false};
 };
 
 DAPDebugger& getDebugger();
