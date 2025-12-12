@@ -478,7 +478,8 @@ void DAPDebugger::processSetBreakpoints(int seq, const json& args) {
         for (const auto& bp : args["breakpoints"]) {
             int line = bp.value("line", 0);
             if (line > 0) {
-                int bpId = setBreakpoint(sourcePath, line);
+                std::string condition = bp.value("condition", "");
+                int         bpId      = setBreakpoint(sourcePath, line, condition);
                 verifiedBreakpoints.push_back({
                     {      "id", bpId},
                     {"verified", true},
@@ -1517,6 +1518,19 @@ bool DAPDebugger::hasBreakpoint(const std::string& source) {
 
 bool DAPDebugger::hasBreakpointInCurrentFrame() { return hasBreakpoint(mCachedFilename); }
 
+Breakpoint* DAPDebugger::getBreakpoint(const std::string& source, int line) {
+    std::lock_guard<std::mutex> lock(mBreakpointMutex);
+
+    for (auto& [bpSource, bpList] : mBreakpoints) {
+        if (path_utils::matches(bpSource, source)) {
+            for (auto& bp : bpList) {
+                if (bp.line == line) return &bp;
+            }
+        }
+    }
+    return nullptr;
+}
+
 int DAPDebugger::registerVariableReference(PyHandle obj) {
     int ref            = mNextVarRef++;
     mVariableRefs[ref] = {VariableRefType::Object, 0, obj};
@@ -1709,9 +1723,54 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
     bool        shouldStop = false;
     std::string stopReason;
 
-    if (hasBreakpoint(source, line)) {
-        shouldStop = true;
-        stopReason = "breakpoint";
+    // 检查断点
+    Breakpoint* bp = getBreakpoint(source, line);
+    if (bp) {
+        bool conditionMet = true;
+
+        // 如果有条件，评估条件表达式
+        if (!bp->condition.empty()) {
+            py::frameToLocals(frame);
+            py::FrameInfo info = py::getFrameInfo(frame);
+
+            py::ObjectGuard code(py::compile(bp->condition.c_str(), "<breakpoint condition>", py::getEvalInputMode()));
+            if (code) {
+                py::ObjectGuard result(py::evalCode(code.get(), info.globals, info.locals));
+                if (result) {
+                    if (py::isNone(result.get())) {
+                        conditionMet = false;
+                    } else if (py::isBool(result.get())) {
+                        std::string repr = py::toString(result.get());
+                        conditionMet     = (repr == "True");
+                    } else if (py::isInt(result.get()) || py::isLong(result.get())) {
+                        std::string valueStr = py::toString(result.get());
+                        conditionMet         = (valueStr != "0");
+                    } else if (py::isString(result.get()) || py::isUnicode(result.get())) {
+                        conditionMet = !py::asString(result.get()).empty();
+                    } else if (py::isList(result.get())) {
+                        conditionMet = py::listSize(result.get()) > 0;
+                    } else if (py::isDict(result.get())) {
+                        long long pos   = 0;
+                        PyHandle  key   = nullptr;
+                        PyHandle  value = nullptr;
+                        conditionMet    = py::dictNext(result.get(), &pos, &key, &value);
+                    } else {
+                        conditionMet = true;
+                    }
+                } else {
+                    py::clearError();
+                    conditionMet = false;
+                }
+            } else {
+                py::clearError();
+                conditionMet = false;
+            }
+        }
+
+        if (conditionMet) {
+            shouldStop = true;
+            stopReason = "breakpoint";
+        }
     }
 
     if (mState == DebuggerState::Stepping) {
@@ -1787,8 +1846,6 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
     }
         )
     );
-
-    std::cout << "[DAP] Stopped at " << source << ":" << line << " (" << stopReason << ")" << std::endl;
 
     // 等待调试命令
     waitForCommand();

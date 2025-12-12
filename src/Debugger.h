@@ -121,11 +121,12 @@ public:
 
     void handleRequest(const std::string& request);
 
-    int  setBreakpoint(const std::string& source, int line, const std::string& condition = "");
-    void clearBreakpoints(const std::string& source);
-    bool hasBreakpoint(const std::string& source, int line);
-    bool hasBreakpoint(const std::string& source);
-    bool hasBreakpointInCurrentFrame();
+    int         setBreakpoint(const std::string& source, int line, const std::string& condition = "");
+    void        clearBreakpoints(const std::string& source);
+    bool        hasBreakpoint(const std::string& source, int line);
+    bool        hasBreakpoint(const std::string& source);
+    bool        hasBreakpointInCurrentFrame();
+    Breakpoint* getBreakpoint(const std::string& source, int line);
 
     // Python Hooks
     void onFrameEnter(PyFrameHandle frame);
