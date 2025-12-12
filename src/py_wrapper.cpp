@@ -24,6 +24,8 @@ struct TypeCache {
     PyTypeObject* boolType       = nullptr;
     PyTypeObject* floatType      = nullptr;
     PyTypeObject* moduleType     = nullptr;
+    PyTypeObject* setType        = nullptr;
+    PyTypeObject* frozensetType  = nullptr;
     PyTypeObject* baseObjectType = nullptr;
     PyObject*     noneObj        = nullptr;
     bool          inited         = false;
@@ -60,6 +62,22 @@ struct TypeCache {
         PyObject* moduleObj = PyImport_AddModule("__main__");
         if (moduleObj) {
             moduleType = Py_TYPE(moduleObj);
+        }
+
+        // 通过 builtins 获取 set 和 frozenset 类型
+        PyObject* builtins = PyImport_AddModule("__builtin__");
+        if (builtins) {
+            PyObject* builtinsDict = PyModule_GetDict(builtins);
+            if (builtinsDict) {
+                PyObject* setTypeObj = PyDict_GetItemString(builtinsDict, "set");
+                if (setTypeObj && PyType_Check(setTypeObj)) {
+                    setType = reinterpret_cast<PyTypeObject*>(setTypeObj);
+                }
+                PyObject* frozensetTypeObj = PyDict_GetItemString(builtinsDict, "frozenset");
+                if (frozensetTypeObj && PyType_Check(frozensetTypeObj)) {
+                    frozensetType = reinterpret_cast<PyTypeObject*>(frozensetTypeObj);
+                }
+            }
         }
 
         // 通过 Py_BuildValue("") 获取 None
@@ -102,6 +120,15 @@ static bool dynModuleCheck(PyObject* op) {
     g_typeCache().ensureInit();
     if (!g_typeCache().moduleType) return false;
     return Py_TYPE(op) == g_typeCache().moduleType || PyType_IsSubtype(Py_TYPE(op), g_typeCache().moduleType);
+}
+
+static bool dynSetCheck(PyObject* op) {
+    g_typeCache().ensureInit();
+    auto& cache = g_typeCache();
+    if (!cache.setType && !cache.frozensetType) return false;
+    PyTypeObject* t = Py_TYPE(op);
+    return (cache.setType && (t == cache.setType || PyType_IsSubtype(t, cache.setType)))
+        || (cache.frozensetType && (t == cache.frozensetType || PyType_IsSubtype(t, cache.frozensetType)));
 }
 
 void initTypeCache() { g_typeCache().ensureInit(); }
@@ -161,6 +188,7 @@ bool isBool(PyHandle obj) { return obj && dynBoolCheck(PY(obj)); }
 bool isDict(PyHandle obj) { return obj && PyDict_Check(PY(obj)); }
 bool isList(PyHandle obj) { return obj && PyList_Check(PY(obj)); }
 bool isTuple(PyHandle obj) { return obj && PyTuple_Check(PY(obj)); }
+bool isSet(PyHandle obj) { return obj && dynSetCheck(PY(obj)); }
 bool isModule(PyHandle obj) { return obj && dynModuleCheck(PY(obj)); }
 bool isType(PyHandle obj) { return obj && PyType_Check(PY(obj)); }
 
@@ -258,6 +286,35 @@ long long tupleSize(PyHandle tuple) {
 PyHandle tupleGetItem(PyHandle tuple, long long index) {
     if (!tuple || !PyTuple_Check(PY(tuple))) return nullptr;
     return HANDLE(PyTuple_GetItem(PY(tuple), static_cast<Py_ssize_t>(index)));
+}
+
+// ============== Set 操作 ==============
+
+long long setSize(PyHandle set) {
+    if (!set || !dynSetCheck(PY(set))) return 0;
+    return static_cast<long long>(reinterpret_cast<PySetObject*>(set)->used);
+}
+
+bool setNext(PyHandle set, long long* pos, PyHandle* key) {
+    if (!set || !dynSetCheck(PY(set)) || !pos || !key) return false;
+
+    PySetObject* so    = reinterpret_cast<PySetObject*>(set);
+    Py_ssize_t   i     = static_cast<Py_ssize_t>(*pos);
+    setentry*    table = so->table;
+    Py_ssize_t   mask  = so->mask;
+
+    while (i <= mask && (table[i].key == nullptr || table[i].key == reinterpret_cast<PyObject*>(-1))) {
+        i++;
+    }
+
+    *pos = static_cast<long long>(i + 1);
+
+    if (i > mask) {
+        return false;
+    }
+
+    *key = HANDLE(table[i].key);
+    return true;
 }
 
 // ============== 模块操作 ==============
@@ -690,7 +747,7 @@ bool isExpandable(PyHandle obj) {
     PyObject* o = PY(obj);
 
     // 基本容器类型
-    if (PyDict_Check(o) || PyList_Check(o) || PyTuple_Check(o) || dynModuleCheck(o)) {
+    if (PyDict_Check(o) || PyList_Check(o) || PyTuple_Check(o) || dynSetCheck(o) || dynModuleCheck(o)) {
         return true;
     }
 

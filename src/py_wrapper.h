@@ -67,6 +67,7 @@ bool isBool(PyHandle obj);
 bool isDict(PyHandle obj);
 bool isList(PyHandle obj);
 bool isTuple(PyHandle obj);
+bool isSet(PyHandle obj);
 bool isModule(PyHandle obj);
 bool isType(PyHandle obj); // 是否为类型对象
 
@@ -97,6 +98,11 @@ PyHandle  listGetItem(PyHandle list, long long index);
 
 long long tupleSize(PyHandle tuple);
 PyHandle  tupleGetItem(PyHandle tuple, long long index);
+
+// ============== Set 操作 ==============
+
+long long setSize(PyHandle set);
+bool      setNext(PyHandle set, long long* pos, PyHandle* key);
 
 // ============== 模块操作 ==============
 

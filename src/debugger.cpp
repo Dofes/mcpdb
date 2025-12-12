@@ -225,8 +225,8 @@ bool DAPDebugger::initialize(int port) {
 }
 
 void DAPDebugger::shutdown() {
-    stopServer();
     state_ = DebuggerState::Disconnected;
+    stopServer();
 }
 
 void DAPDebugger::startServer(int port) {
@@ -669,6 +669,8 @@ void DAPDebugger::processVariables(int seq, const json& args) {
                                  variables = getVariablesFromList(obj);
                              } else if (py::isTuple(obj)) {
                                  variables = getVariablesFromTuple(obj);
+                             } else if (py::isSet(obj)) {
+                                 variables = getVariablesFromSet(obj);
                              } else if (py::isModule(obj)) {
                                  PyHandle dict = py::moduleGetDict(obj);
                                  if (dict) {
@@ -699,6 +701,8 @@ void DAPDebugger::processVariables(int seq, const json& args) {
                     variables = getVariablesFromList(obj);
                 } else if (py::isTuple(obj)) {
                     variables = getVariablesFromTuple(obj);
+                } else if (py::isSet(obj)) {
+                    variables = getVariablesFromSet(obj);
                 } else if (py::isModule(obj)) {
                     PyHandle dict = py::moduleGetDict(obj);
                     if (dict) {
@@ -791,6 +795,21 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
     std::string expression = args.value("expression", "");
     std::string context    = args.value("context", "");
     bool        isRepl     = (context == "repl");
+    bool        isHover    = (context == "hover");
+
+    if (isHover && !expression.empty() && expression[0] == '.') {
+        sendMessage(
+            DAPMessageBuilder::response(
+                seq,
+                "evaluate",
+                false,
+                {
+                    {"message", "Cannot evaluate partial expression"}
+        }
+            )
+        );
+        return;
+    }
 
     std::string result;
     std::string type;
@@ -957,6 +976,20 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
         }
     }
 
+    if (isHover && result.empty()) {
+        sendMessage(
+            DAPMessageBuilder::response(
+                seq,
+                "evaluate",
+                false,
+                {
+                    {"message", "Cannot evaluate expression"}
+        }
+            )
+        );
+        return;
+    }
+
     if (isError && isRepl) {
         sendMessage(
             DAPMessageBuilder::response(
@@ -970,6 +1003,7 @@ void DAPDebugger::processEvaluate(int seq, const json& args) {
             )
         );
     } else {
+        std::cout << "[DAP] Eval result: " << result << std::endl;
         sendMessage(
             DAPMessageBuilder::response(
                 seq,
@@ -1547,6 +1581,28 @@ json DAPDebugger::getVariablesFromTuple(PyHandle tuple) {
         PyHandle item = py::tupleGetItem(tuple, i);
         variables.push_back(extractVariable(fmt::format("[{}]", i), item));
     }
+    return variables;
+}
+
+json DAPDebugger::getVariablesFromSet(PyHandle set) {
+    json      variables = json::array();
+    long long pos       = 0;
+    PyHandle  key       = nullptr;
+    int       index     = 0;
+
+    while (py::setNext(set, &pos, &key) && index < dap::kMaxVariables) {
+        std::string name = fmt::format("{}", reinterpret_cast<uintptr_t>(key));
+        variables.push_back(extractVariable(name, key));
+        ++index;
+    }
+
+    long long size = py::setSize(set);
+    variables.push_back({
+        {              "name",              "len()"},
+        {             "value", std::to_string(size)},
+        {"variablesReference",                    0}
+    });
+
     return variables;
 }
 

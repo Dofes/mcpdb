@@ -178,6 +178,7 @@ private:
     json getVariablesFromDict(PyHandle dict);
     json getVariablesFromList(PyHandle list);
     json getVariablesFromTuple(PyHandle tuple);
+    json getVariablesFromSet(PyHandle set);
     json getVariablesFromObject(PyHandle obj);
     json extractVariable(const std::string& name, PyHandle value);
 
