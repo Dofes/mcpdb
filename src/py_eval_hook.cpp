@@ -280,7 +280,6 @@ SKY_AUTO_STATIC_HOOK(
         if (getDebugger().isRunning()) {
             getDebugger().onFrameExit(f);
         }
-        currentFrame = nullptr;
         return ori;
     }
 

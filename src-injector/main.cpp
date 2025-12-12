@@ -299,7 +299,7 @@ int main(int argc, char* argv[]) {
                         throw std::runtime_error("目标进程已退出");
                     }
                     CloseHandle(hCheck);
-                    Sleep(1000);
+                    Sleep(100);
                 }
                 std::cout << "Minecraft 窗口已就绪\n";
             }

@@ -36,6 +36,11 @@ int PyType_IsSubtype(_typeobject* a, _typeobject* b) {
 
 PyObject* PyObject_GetAttrString(PyObject* a, const char* b) {
     static auto funcptr = memory::resolveSignature("40 57 48 83 EC 20 48 8B 41 08 48 8B F9 4C 8B 40");
+    static bool logged  = false;
+    if (!logged) {
+        std::cout << "[PyHook] PyObject_GetAttrString funcptr = " << funcptr << std::endl;
+        logged = true;
+    }
     if (funcptr) {
         using FuncType = PyObject*(__fastcall*)(PyObject*, const char*);
         FuncType func  = reinterpret_cast<FuncType>(funcptr);
@@ -300,4 +305,250 @@ char* PyString_AsString(PyObject* o) {
         return func(o);
     }
     return nullptr;
+}
+
+void PyEval_SetTrace(Py_tracefunc func, PyObject* arg) {
+
+    static auto funcptr =
+        memory::resolveSignature("48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 1D ? ? ? ? 45 33 C0 48 8B F1");
+    if (funcptr) {
+        using FuncType = void(__fastcall*)(Py_tracefunc, PyObject*);
+        FuncType func2 = reinterpret_cast<FuncType>(funcptr);
+        return func2(func, arg);
+    }
+}
+
+int _PyCode_CheckLineNumber(PyCodeObject* co, int lasti, PyAddrPair* bounds) {
+    int            size, addr, line;
+    unsigned char* p;
+
+    p    = (unsigned char*)PyString_AS_STRING(co->co_lnotab);
+    size = PyString_GET_SIZE(co->co_lnotab) / 2;
+
+    addr = 0;
+    line = co->co_firstlineno;
+    assert(line > 0);
+
+    /* possible optimization: if f->f_lasti == instr_ub
+       (likely to be a common case) then we already know
+       instr_lb -- if we stored the matching value of p
+       somewhere we could skip the first while loop. */
+
+    /* See lnotab_notes.txt for the description of
+       co_lnotab.  A point to remember: increments to p
+       come in (addr, line) pairs. */
+
+    bounds->ap_lower = 0;
+    while (size > 0) {
+        if (addr + *p > lasti) break;
+        addr += *p++;
+        if (*p) bounds->ap_lower = addr;
+        line += *p++;
+        --size;
+    }
+
+    if (size > 0) {
+        while (--size >= 0) {
+            addr += *p++;
+            if (*p++) break;
+        }
+        bounds->ap_upper = addr;
+    } else {
+        bounds->ap_upper = INT_MAX;
+    }
+
+    return line;
+}
+
+
+// int PyString_AsStringAndSize(
+//     PyObject*   obj, /* string or Unicode object */
+//     char**      s,   /* pointer to buffer variable */
+//     Py_ssize_t* len  /* pointer to length variable or NULL
+//                 (only possible for 0-terminated
+//                 strings) */
+// ) {
+//     static auto funcptr = memory::resolveSignature(
+//         "48 89 5C 24 08 57 48 83 EC 20 49 8B D8 48 8B FA 48 85 D2 75 1F BA 24 03 00 00 48 8D 0D 9F FC 91"
+//     );
+//     if (funcptr) {
+//         using FuncType = int(__fastcall*)(PyObject*, char**, Py_ssize_t*);
+//         FuncType func  = reinterpret_cast<FuncType>(funcptr);
+//         return func(obj, s, len);
+//     }
+//     return -1;
+// }
+
+PyGILState_STATE PyGILState_Ensure() {
+    static auto funcptr =
+        memory::resolveSignature("48 89 5C 24 10 57 48 83 EC 20 8B 0D ? ? ? ? E8 ? ? ? ? 48 8B D8 48 85 C0 75 33");
+    if (funcptr) {
+        using FuncType = PyGILState_STATE(__fastcall*)();
+        return reinterpret_cast<FuncType>(funcptr)();
+    }
+    return PyGILState_UNLOCKED;
+}
+
+void PyGILState_Release(PyGILState_STATE state) {
+    static auto funcptr =
+        memory::resolveSignature("48 89 5C 24 08 57 48 83 EC 20 8B F9 8B 0D ? ? ? ? E8 ? ? ? ? 48 8B D8");
+    if (funcptr) {
+        using FuncType = void(__fastcall*)(PyGILState_STATE);
+        reinterpret_cast<FuncType>(funcptr)(state);
+    }
+}
+
+PyThreadState* PyEval_SaveThread() {
+    static auto funcptr = memory::resolveSignature("40 53 48 83 EC 20 33 C9 E8 ? ? ? ? 48 8B D8");
+    if (funcptr) {
+        using FuncType = PyThreadState*(__fastcall*)();
+        return reinterpret_cast<FuncType>(funcptr)();
+    }
+    return nullptr;
+}
+
+void PyEval_RestoreThread(PyThreadState* tstate) {
+    static auto funcptr = memory::resolveSignature("40 57 48 83 EC 20 48 8B  F9 48 85 C9 75 0C");
+    if (funcptr) {
+        using FuncType = void(__fastcall*)(PyThreadState*);
+        reinterpret_cast<FuncType>(funcptr)(tstate);
+    }
+}
+
+void PyFrame_LocalsToFast(PyFrameObject* f, int clear) {
+    static auto funcptr = memory::resolveSignature("48 85 C9 0F 84 2E 02 00 00 4C 8B DC 53 41 56");
+    if (funcptr) {
+        using FuncType = void(__fastcall*)(PyFrameObject*, int);
+        reinterpret_cast<FuncType>(funcptr)(f, clear);
+    }
+}
+
+int PyDict_SetItemString(PyObject* dp, const char* key, PyObject* item) {
+    static auto funcptr = memory::resolveSignature(
+        "48 89 5C 24 20 57 48 83 EC 30 48 8B 05 ? ? ? ? 48 33 C4 48 89 44 24 28 48 8B D9 49 8B F8 48 8B CA"
+    );
+    if (funcptr) {
+        using FuncType = int(__fastcall*)(PyObject*, const char*, PyObject*);
+        return reinterpret_cast<FuncType>(funcptr)(dp, key, item);
+    }
+    return -1;
+}
+
+int PyDict_DelItemString(PyObject* dp, const char* key) {
+    static auto funcptr =
+        memory::resolveSignature("48 89 5C 24 08 57 48 83 EC 20 48 8B F9 48 8B CA E8 ? ? ? ? 48 8B D8 48 85 C0 75 0E");
+    if (funcptr) {
+        using FuncType = int(__fastcall*)(PyObject*, const char*);
+        return reinterpret_cast<FuncType>(funcptr)(dp, key);
+    }
+    return -1;
+}
+
+PyObject* PyImport_ImportModule(const char* name) {
+    static auto funcptr = memory::resolveSignature("48 83 EC 28 E8 ? ? ? ? 48 89 44 24 38");
+    if (funcptr) {
+        using FuncType = PyObject*(__fastcall*)(const char*);
+        return reinterpret_cast<FuncType>(funcptr)(name);
+    }
+    return nullptr;
+}
+
+PyObject* PyEval_CallObjectWithKeywords(PyObject* callable, PyObject* args, PyObject* kwds) {
+    static auto funcptr = memory::resolveSignature(
+        "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 49 8B F8 48 8B DA 48 8B F1 48 85 D2 75 11"
+    );
+    if (funcptr) {
+        using FuncType = PyObject*(__fastcall*)(PyObject*, PyObject*, PyObject*);
+        return reinterpret_cast<FuncType>(funcptr)(callable, args, kwds);
+    }
+    return nullptr;
+}
+
+PyObject* PyObject_CallObject(PyObject* callable, PyObject* args) {
+    return PyEval_CallObjectWithKeywords(callable, args, NULL);
+}
+
+int PyObject_SetAttrString(PyObject* o, const char* attr_name, PyObject* v) {
+    static auto funcptr =
+        memory::resolveSignature("40 55 56 48 83 EC 48 48 8B 05 ? ?  ? ? 48 33 C4 48 89 44 24 38 48 8B 41 08");
+    if (funcptr) {
+        using FuncType = int(__fastcall*)(PyObject*, const char*, PyObject*);
+        return reinterpret_cast<FuncType>(funcptr)(o, attr_name, v);
+    }
+    return -1;
+}
+
+PyObject* PyObject_Str(PyObject* o) {
+    static auto funcptr = memory::resolveSignature(
+        "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 48 85 C9 75 0E 48 8D 0D ?  ? ? ? E8 ? ? ? ? EB 36"
+    );
+    if (funcptr) {
+        using FuncType = PyObject*(__fastcall*)(PyObject*);
+        return reinterpret_cast<FuncType>(funcptr)(o);
+    }
+    return nullptr;
+}
+
+void PyErr_Fetch(PyObject** ptype, PyObject** pvalue, PyObject** ptraceback) {
+    static auto funcptr = memory::resolveSignature("4C 8B 0D ? ? ? ? 49 8B 41 48 48 89 01 49 8B 41 50");
+    if (funcptr) {
+        using FuncType = void(__fastcall*)(PyObject**, PyObject**, PyObject**);
+        reinterpret_cast<FuncType>(funcptr)(ptype, pvalue, ptraceback);
+    }
+}
+
+void PyErr_NormalizeException(PyObject** exc, PyObject** val, PyObject** tb) {
+    static auto funcptr =
+        memory::resolveSignature("48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 41 54 41 56 41 57 48 83 EC 20 48 8B 39");
+    if (funcptr) {
+        using FuncType = void(__fastcall*)(PyObject**, PyObject**, PyObject**);
+        reinterpret_cast<FuncType>(funcptr)(exc, val, tb);
+    }
+}
+
+PyObject* PyTuple_New(Py_ssize_t size) {
+    static auto funcptr = memory::resolveSignature(
+        "40 53 48 83 EC 20 48 8B D9 48 85 C9 79 19 BA 36 00 00 00 48 8D 0D ? ? ? ? E8 ? ? ? ? 33 C0"
+    );
+    if (funcptr) {
+        using FuncType = PyObject*(__fastcall*)(Py_ssize_t);
+        FuncType func  = reinterpret_cast<FuncType>(funcptr);
+        return func(size);
+    }
+    return nullptr;
+}
+
+PyObject* PyTuple_Pack(Py_ssize_t n, ...) {
+    Py_ssize_t i;
+    PyObject*  o;
+    PyObject*  result;
+    PyObject** items;
+    va_list    vargs;
+
+    va_start(vargs, n);
+    result = PyTuple_New(n);
+    if (result == NULL) {
+        va_end(vargs);
+        return NULL;
+    }
+    items = ((PyTupleObject*)result)->ob_item;
+    for (i = 0; i < n; i++) {
+        o = va_arg(vargs, PyObject*);
+        Py_INCREF(o);
+        items[i] = o;
+    }
+    va_end(vargs);
+    return result;
+}
+
+void PyErr_Restore(PyObject* a, PyObject* b, PyObject* c) {
+
+    static auto funcptr = memory::resolveSignature(
+        "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 48 8B 35 ? ? ? ? 48 8B EA "
+        "4C 8B F1 4D 85 C0 74 1F 49 8B 40 08"
+    );
+    if (funcptr) {
+        using FuncType = void(__fastcall*)(PyObject*, PyObject*, PyObject*);
+        reinterpret_cast<FuncType>(funcptr)(a, b, c);
+    }
 }

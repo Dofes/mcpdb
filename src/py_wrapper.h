@@ -2,6 +2,7 @@
 
 
 #include <string>
+#include <vector>
 
 using PyHandle      = void*;
 using PyFrameHandle = void*;
@@ -18,6 +19,20 @@ void initTypeCache();
 void incref(PyHandle obj);
 void decref(PyHandle obj);
 void xdecref(PyHandle obj);
+
+// ============== GIL 管理 ==============
+
+class GILGuard {
+public:
+    GILGuard();
+    ~GILGuard();
+
+    GILGuard(const GILGuard&)            = delete;
+    GILGuard& operator=(const GILGuard&) = delete;
+
+private:
+    int state_;
+};
 
 // ============== RAII 包装器 ==============
 
@@ -53,6 +68,7 @@ bool isDict(PyHandle obj);
 bool isList(PyHandle obj);
 bool isTuple(PyHandle obj);
 bool isModule(PyHandle obj);
+bool isType(PyHandle obj); // 是否为类型对象
 
 // ============== 字符串操作 ==============
 
@@ -85,6 +101,8 @@ PyHandle  tupleGetItem(PyHandle tuple, long long index);
 // ============== 模块操作 ==============
 
 PyHandle moduleGetDict(PyHandle module);
+PyHandle importAddModule(const char* name);
+PyHandle importModule(const char* name); // PyImport_ImportModule
 
 // ============== 帧操作 ==============
 
@@ -101,7 +119,13 @@ struct FrameInfo {
 FrameInfo     getFrameInfo(PyFrameHandle frame);
 int           getFrameLineNumber(PyFrameHandle frame);
 void          frameToLocals(PyFrameHandle frame);
+void          localsToFast(PyFrameHandle frame);
 PyFrameHandle getFrameBack(PyFrameHandle frame);
+
+// ============== 字典操作 ==============
+
+int  dictSetItemString(PyHandle dict, const char* key, PyHandle value);
+void dictDelItemString(PyHandle dict, const char* key);
 
 // ============== 代码执行 ==============
 
@@ -112,6 +136,27 @@ void     clearError();
 // ============== 编译模式常量 ==============
 
 int getEvalInputMode();
+int getSingleInputMode();
+
+// ============== REPL 执行 ==============
+
+struct REPLResult {
+    std::string output;
+    bool        isError;
+    PyHandle    resultObject; // 表达式的结果对象（需要调用者 decref），仅表达式有效
+    std::string resultType;
+};
+
+// 执行 REPL 代码（支持语句），返回捕获的输出
+REPLResult execREPL(const char* source, PyHandle globals, PyHandle locals);
+
+// ============== 自动补全 ==============
+
+// 获取对象的所有属性名（用于自动补全）
+std::vector<std::string> getCompletions(PyHandle obj, const std::string& prefix);
+
+// 获取字典的所有键名
+std::vector<std::string> getDictKeys(PyHandle dict);
 
 // ============== 高级工具函数 ==============
 

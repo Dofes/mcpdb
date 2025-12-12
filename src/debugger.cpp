@@ -162,6 +162,29 @@ json DAPMessageBuilder::response(int requestSeq, const std::string& command, boo
     return resp;
 }
 
+json DAPMessageBuilder::response(
+    int                requestSeq,
+    const std::string& command,
+    bool               success,
+    const json&        body,
+    const std::string& message
+) {
+    json resp = {
+        {        "seq",  nextSeq()},
+        {       "type", "response"},
+        {"request_seq", requestSeq},
+        {    "success",    success},
+        {    "command",    command}
+    };
+    if (!message.empty()) {
+        resp["message"] = message;
+    }
+    if (!body.is_null()) {
+        resp["body"] = body;
+    }
+    return resp;
+}
+
 json DAPMessageBuilder::event(const std::string& eventName, const json& body) {
     json evt = {
         {  "seq", nextSeq()},
@@ -381,6 +404,10 @@ void DAPDebugger::handleRequest(const std::string& request) {
             processPause(seq, args);
         } else if (command == "evaluate") {
             processEvaluate(seq, args);
+        } else if (command == "setVariable") {
+            processSetVariable(seq, args);
+        } else if (command == "completions") {
+            processCompletions(seq, args);
         } else if (command == "disconnect") {
             processDisconnect(seq, args);
         } else {
@@ -402,24 +429,25 @@ void DAPDebugger::handleRequest(const std::string& request) {
 
 void DAPDebugger::processInitialize(int seq, const json& /*args*/) {
     json capabilities = {
-        { "supportsConfigurationDoneRequest",  true},
-        {      "supportsFunctionBreakpoints", false},
-        {   "supportsConditionalBreakpoints",  true},
-        {"supportsHitConditionalBreakpoints", false},
-        {        "supportsEvaluateForHovers",  true},
-        {                 "supportsStepBack", false},
-        {              "supportsSetVariable", false},
-        {             "supportsRestartFrame", false},
-        {       "supportsGotoTargetsRequest", false},
-        {     "supportsStepInTargetsRequest", false},
-        {       "supportsCompletionsRequest", false},
-        {           "supportsModulesRequest", false},
-        {         "supportsExceptionOptions", false},
-        {   "supportsValueFormattingOptions", false},
-        {     "supportsExceptionInfoRequest", false},
-        {         "supportTerminateDebuggee",  true},
-        { "supportsDelayedStackTraceLoading", false},
-        {     "supportsLoadedSourcesRequest", false}
+        { "supportsConfigurationDoneRequest",       true},
+        {      "supportsFunctionBreakpoints",      false},
+        {   "supportsConditionalBreakpoints",       true},
+        {"supportsHitConditionalBreakpoints",      false},
+        {        "supportsEvaluateForHovers",       true},
+        {                 "supportsStepBack",      false},
+        {              "supportsSetVariable",       true},
+        {             "supportsRestartFrame",      false},
+        {       "supportsGotoTargetsRequest",      false},
+        {     "supportsStepInTargetsRequest",      false},
+        {       "supportsCompletionsRequest",       true},
+        {      "completionTriggerCharacters", {".", "["}},
+        {           "supportsModulesRequest",      false},
+        {         "supportsExceptionOptions",      false},
+        {   "supportsValueFormattingOptions",      false},
+        {     "supportsExceptionInfoRequest",      false},
+        {         "supportTerminateDebuggee",       true},
+        { "supportsDelayedStackTraceLoading",      false},
+        {     "supportsLoadedSourcesRequest",      false}
     };
 
     sendMessage(DAPMessageBuilder::response(seq, "initialize", true, capabilities));
@@ -520,16 +548,22 @@ void DAPDebugger::processStackTrace(int seq, const json& /*args*/) {
 void DAPDebugger::processScopes(int seq, const json& args) {
     int frameId = args.value("frameId", 0);
 
+    int localsRef  = nextVarRef_++;
+    int globalsRef = nextVarRef_++;
+
+    variableRefs_[localsRef]  = {VariableRefType::Locals, frameId, nullptr};
+    variableRefs_[globalsRef] = {VariableRefType::Globals, frameId, nullptr};
+
     json scopes = json::array();
     scopes.push_back({
-        {              "name",                                                  "Locals"},
-        {"variablesReference", frameId * dap::kScopeMultiplier + dap::kLocalsScopeOffset},
-        {         "expensive",                                                     false}
+        {              "name",  "Locals"},
+        {"variablesReference", localsRef},
+        {         "expensive",     false}
     });
     scopes.push_back({
-        {              "name",                                                  "Globals"},
-        {"variablesReference", frameId * dap::kScopeMultiplier + dap::kGlobalsScopeOffset},
-        {         "expensive",                                                      false}
+        {              "name",  "Globals"},
+        {"variablesReference", globalsRef},
+        {         "expensive",      false}
     });
 
     sendMessage(
@@ -547,55 +581,132 @@ void DAPDebugger::processScopes(int seq, const json& args) {
 void DAPDebugger::processVariables(int seq, const json& args) {
     int varRef = args.value("variablesReference", 0);
 
-    std::lock_guard<std::mutex> lock(frameMutex_);
-    json                        variables = json::array();
+    json variables = json::array();
 
-    int frameId   = varRef / dap::kScopeMultiplier;
-    int scopeType = varRef % dap::kScopeMultiplier;
-
-    // 查找对应的帧
-    PyFrameHandle frame = nullptr;
-    for (const auto& sf : stackFrames_) {
-        if (sf.id == frameId) {
-            frame = sf.pyFrame;
-            break;
+    VariableRef ref;
+    {
+        std::lock_guard<std::mutex> lock(frameMutex_);
+        auto                        it = variableRefs_.find(varRef);
+        if (it == variableRefs_.end()) {
+            sendMessage(
+                DAPMessageBuilder::response(
+                    seq,
+                    "variables",
+                    false,
+                    {
+                        {"message", "Variable reference no longer valid."}
+            }
+                )
+            );
+            return;
         }
+        ref = it->second;
     }
 
-    if (frame) {
-        py::FrameInfo info = py::getFrameInfo(frame);
-        PyHandle      dict = nullptr;
-
-        if (scopeType == dap::kLocalsScopeOffset) {
-            py::frameToLocals(frame);
-            info = py::getFrameInfo(frame); // 刷新 locals
-            dict = info.locals;
-        } else if (scopeType == dap::kGlobalsScopeOffset) {
-            dict = info.globals;
+    // Locals/Globals 只在 Stopped 状态可用
+    if ((ref.type == VariableRefType::Locals || ref.type == VariableRefType::Globals)
+        && state_ != DebuggerState::Stopped) {
+        sendMessage(
+            DAPMessageBuilder::response(
+                seq,
+                "variables",
+                false,
+                {
+                    {"message", "Cannot access frame variables while running."}
         }
+            )
+        );
+        return;
+    }
 
-        if (dict && py::isDict(dict)) {
-            variables = getVariablesFromDict(dict);
+    if (state_ == DebuggerState::Stopped) {
+        // 提交任务到主线程执行
+        auto completion = std::make_shared<std::promise<void>>();
+        auto future     = completion->get_future();
+
+        {
+            std::lock_guard<std::mutex> lock(taskQueueMutex_);
+            taskQueue_.push(
+                {[this, &ref, &variables]() {
+                     switch (ref.type) {
+                     case VariableRefType::Locals:
+                     case VariableRefType::Globals: {
+                         PyFrameHandle frame = nullptr;
+                         {
+                             std::lock_guard<std::mutex> flock(frameMutex_);
+                             for (const auto& sf : stackFrames_) {
+                                 if (sf.id == ref.frameId) {
+                                     frame = sf.pyFrame;
+                                     break;
+                                 }
+                             }
+                         }
+
+                         if (frame) {
+                             py::FrameInfo info = py::getFrameInfo(frame);
+                             PyHandle      dict = nullptr;
+
+                             if (ref.type == VariableRefType::Locals) {
+                                 py::frameToLocals(frame);
+                                 info = py::getFrameInfo(frame);
+                                 dict = info.locals;
+                             } else {
+                                 dict = info.globals;
+                             }
+
+                             if (dict && py::isDict(dict)) {
+                                 variables = getVariablesFromDict(dict);
+                             }
+                         }
+                         break;
+                     }
+                     case VariableRefType::Object: {
+                         PyHandle obj = ref.object;
+                         if (obj) {
+                             if (py::isDict(obj)) {
+                                 variables = getVariablesFromDict(obj);
+                             } else if (py::isList(obj)) {
+                                 variables = getVariablesFromList(obj);
+                             } else if (py::isTuple(obj)) {
+                                 variables = getVariablesFromTuple(obj);
+                             } else if (py::isModule(obj)) {
+                                 PyHandle dict = py::moduleGetDict(obj);
+                                 if (dict) {
+                                     variables = getVariablesFromDict(dict);
+                                 }
+                             } else {
+                                 variables = getVariablesFromObject(obj);
+                             }
+                         }
+                         break;
+                     }
+                     }
+                 },
+                 completion}
+            );
         }
-    } else if (varRef >= dap::kVariableRefBase) {
-        // 处理嵌套变量引用
-        auto it = variableRefs_.find(varRef);
-        if (it != variableRefs_.end()) {
-            PyHandle obj = it->second;
-
-            if (py::isDict(obj)) {
-                variables = getVariablesFromDict(obj);
-            } else if (py::isList(obj)) {
-                variables = getVariablesFromList(obj);
-            } else if (py::isTuple(obj)) {
-                variables = getVariablesFromTuple(obj);
-            } else if (py::isModule(obj)) {
-                PyHandle dict = py::moduleGetDict(obj);
-                if (dict) {
-                    variables = getVariablesFromDict(dict);
+        taskQueueCV_.notify_one();
+        future.wait();
+    } else {
+        // Running 状态，Object 类型需要获取 GIL
+        if (ref.type == VariableRefType::Object) {
+            py::GILGuard gil;
+            PyHandle     obj = ref.object;
+            if (obj) {
+                if (py::isDict(obj)) {
+                    variables = getVariablesFromDict(obj);
+                } else if (py::isList(obj)) {
+                    variables = getVariablesFromList(obj);
+                } else if (py::isTuple(obj)) {
+                    variables = getVariablesFromTuple(obj);
+                } else if (py::isModule(obj)) {
+                    PyHandle dict = py::moduleGetDict(obj);
+                    if (dict) {
+                        variables = getVariablesFromDict(dict);
+                    }
+                } else {
+                    variables = getVariablesFromObject(obj);
                 }
-            } else {
-                variables = getVariablesFromObject(obj);
             }
         }
     }
@@ -612,9 +723,20 @@ void DAPDebugger::processVariables(int seq, const json& args) {
     );
 }
 
+void DAPDebugger::clearVariableReferences() {
+    for (auto& [id, ref] : variableRefs_) {
+        if (ref.type == VariableRefType::Object && ref.object) {
+            py::xdecref(ref.object);
+        }
+    }
+    variableRefs_.clear();
+    nextVarRef_ = 1;
+}
+
 void DAPDebugger::processContinue(int seq, const json& /*args*/) {
     stepMode_ = StepMode::None;
     state_    = DebuggerState::Running;
+    clearVariableReferences();
     sendMessage(
         DAPMessageBuilder::response(
             seq,
@@ -633,6 +755,7 @@ void DAPDebugger::processNext(int seq, const json& /*args*/) {
     stepStartFrame_ = currentFrame_;
     stepDepth_      = py::calculateFrameDepth(currentFrame_);
     state_          = DebuggerState::Stepping;
+    clearVariableReferences();
 
     sendMessage(DAPMessageBuilder::response(seq, "next", true));
     notifyCommandReceived();
@@ -642,6 +765,7 @@ void DAPDebugger::processStepIn(int seq, const json& /*args*/) {
     stepMode_       = StepMode::Into;
     stepStartFrame_ = currentFrame_;
     state_          = DebuggerState::Stepping;
+    clearVariableReferences();
 
     sendMessage(DAPMessageBuilder::response(seq, "stepIn", true));
     notifyCommandReceived();
@@ -652,6 +776,7 @@ void DAPDebugger::processStepOut(int seq, const json& /*args*/) {
     stepStartFrame_ = currentFrame_;
     stepDepth_      = py::calculateFrameDepth(currentFrame_);
     state_          = DebuggerState::Stepping;
+    clearVariableReferences();
 
     sendMessage(DAPMessageBuilder::response(seq, "stepOut", true));
     notifyCommandReceived();
@@ -664,74 +789,643 @@ void DAPDebugger::processPause(int seq, const json& /*args*/) {
 
 void DAPDebugger::processEvaluate(int seq, const json& args) {
     std::string expression = args.value("expression", "");
-    int         frameId    = args.value("frameId", 0);
+    std::string context    = args.value("context", "");
+    bool        isRepl     = (context == "repl");
 
-    PyFrameHandle frame = nullptr;
-    for (const auto& sf : stackFrames_) {
-        if (sf.id == frameId) {
-            frame = sf.pyFrame;
-            break;
-        }
-    }
+    std::string result;
+    std::string type;
+    int         varRef  = 0;
+    bool        isError = false;
 
-    std::string result = "<unable to evaluate>";
-    std::string type   = "error";
-    int         varRef = 0;
+    // 如果调试器已暂停，提交任务到主线程执行
+    if (state_ == DebuggerState::Stopped) {
+        // 创建完成通知
+        auto completion = std::make_shared<std::promise<void>>();
+        auto future     = completion->get_future();
 
-    if (frame) {
-        py::frameToLocals(frame);
-        py::FrameInfo info    = py::getFrameInfo(frame);
-        PyHandle      locals  = info.locals;
-        PyHandle      globals = info.globals;
+        // 获取 frame（在当前线程安全获取）
+        PyFrameHandle frame = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(frameMutex_);
 
-        PyHandle value = nullptr;
-        if (locals && py::isDict(locals)) {
-            value = py::dictGetItemString(locals, expression.c_str());
-        }
-        if (!value && globals && py::isDict(globals)) {
-            value = py::dictGetItemString(globals, expression.c_str());
-        }
-
-        if (value) {
-            result = py::getRepr(value, dap::kMaxEvalResultLength);
-            type   = py::getTypeName(value);
-
-            if (py::isExpandable(value)) {
-                py::incref(value);
-                varRef = registerVariableReference(value);
-            }
-        } else {
-            py::ObjectGuard code(py::compile(expression.c_str(), "<eval>", py::getEvalInputMode()));
-            if (code) {
-                py::ObjectGuard evalResult(py::evalCode(code.get(), globals, locals));
-                if (evalResult) {
-                    result = py::getRepr(evalResult.get(), dap::kMaxEvalResultLength);
-                    type   = py::getTypeName(evalResult.get());
-
-                    if (py::isExpandable(evalResult.get())) {
-                        varRef = registerVariableReference(evalResult.release());
+            if (args.contains("frameId")) {
+                int frameId = args["frameId"].get<int>();
+                for (const auto& sf : stackFrames_) {
+                    if (sf.id == frameId) {
+                        frame = sf.pyFrame;
+                        break;
                     }
-                } else {
-                    py::clearError();
+                }
+            }
+
+            if (!frame) {
+                if (currentFrame_) {
+                    frame = currentFrame_;
+                } else if (!stackFrames_.empty()) {
+                    frame = stackFrames_.front().pyFrame;
+                }
+            }
+        }
+
+        if (!frame) {
+            sendMessage(
+                DAPMessageBuilder::response(
+                    seq,
+                    "evaluate",
+                    false,
+                    {
+                        {"error", {{"id", seq}, {"format", "No frame available"}, {"showUser", false}}}
+            },
+                    "No frame available"
+                )
+            );
+            return;
+        }
+
+        // 提交任务到主线程
+        {
+            std::lock_guard<std::mutex> lock(taskQueueMutex_);
+            taskQueue_.push(
+                {[this, frame, expression, isRepl, &result, &type, &varRef, &isError]() {
+                     // 这个 lambda 在主线程执行
+                     py::frameToLocals(frame);
+                     py::FrameInfo info    = py::getFrameInfo(frame);
+                     PyHandle      locals  = info.locals;
+                     PyHandle      globals = info.globals;
+
+                     if (isRepl) {
+                         auto replResult = py::execREPL(expression.c_str(), globals, locals);
+                         result          = replResult.output;
+                         isError         = replResult.isError;
+                         type            = replResult.resultType;
+                         // 如果有结果对象且可展开，注册变量引用
+                         if (replResult.resultObject && py::isExpandable(replResult.resultObject)) {
+                             varRef = registerVariableReference(replResult.resultObject);
+                         } else if (replResult.resultObject) {
+                             py::decref(replResult.resultObject);
+                         }
+                         py::localsToFast(frame);
+                     } else {
+                         PyHandle value = nullptr;
+                         if (locals && py::isDict(locals)) {
+                             value = py::dictGetItemString(locals, expression.c_str());
+                         }
+                         if (!value && globals && py::isDict(globals)) {
+                             value = py::dictGetItemString(globals, expression.c_str());
+                         }
+
+                         if (value) {
+                             result = py::getRepr(value, dap::kMaxEvalResultLength);
+                             type   = py::getTypeName(value);
+                             if (py::isExpandable(value)) {
+                                 py::incref(value);
+                                 varRef = registerVariableReference(value);
+                             }
+                         } else {
+                             py::ObjectGuard code(py::compile(expression.c_str(), "<eval>", py::getEvalInputMode()));
+                             if (code) {
+                                 py::ObjectGuard evalResult(py::evalCode(code.get(), globals, locals));
+                                 if (evalResult) {
+                                     result = py::getRepr(evalResult.get(), dap::kMaxEvalResultLength);
+                                     type   = py::getTypeName(evalResult.get());
+                                     if (py::isExpandable(evalResult.get())) {
+                                         varRef = registerVariableReference(evalResult.release());
+                                     }
+                                 } else {
+                                     py::clearError();
+                                 }
+                             } else {
+                                 py::clearError();
+                             }
+                         }
+                     }
+                 },
+                 completion}
+            );
+        }
+        taskQueueCV_.notify_one();
+
+        // 等待主线程执行完毕
+        future.wait();
+    } else {
+        // 调试器运行中，需要获取 GIL 才能安全执行 Python 代码
+        py::GILGuard gil;
+
+        PyHandle mainModule = py::importAddModule("__main__");
+        PyHandle globals    = mainModule ? py::moduleGetDict(mainModule) : nullptr;
+
+        if (globals && py::isDict(globals)) {
+            if (isRepl) {
+                auto replResult = py::execREPL(expression.c_str(), globals, globals);
+                result          = replResult.output;
+                isError         = replResult.isError;
+                type            = replResult.resultType;
+                // 如果有结果对象且可展开，注册变量引用
+                if (replResult.resultObject && py::isExpandable(replResult.resultObject)) {
+                    varRef = registerVariableReference(replResult.resultObject);
+                } else if (replResult.resultObject) {
+                    py::decref(replResult.resultObject);
                 }
             } else {
-                py::clearError();
+                PyHandle value = py::dictGetItemString(globals, expression.c_str());
+
+                if (value) {
+                    result = py::getRepr(value, dap::kMaxEvalResultLength);
+                    type   = py::getTypeName(value);
+                    if (py::isExpandable(value)) {
+                        py::incref(value);
+                        varRef = registerVariableReference(value);
+                    }
+                } else {
+                    py::ObjectGuard code(py::compile(expression.c_str(), "<eval>", py::getEvalInputMode()));
+                    if (code) {
+                        py::ObjectGuard evalResult(py::evalCode(code.get(), globals, globals));
+                        if (evalResult) {
+                            result = py::getRepr(evalResult.get(), dap::kMaxEvalResultLength);
+                            type   = py::getTypeName(evalResult.get());
+                            if (py::isExpandable(evalResult.get())) {
+                                varRef = registerVariableReference(evalResult.release());
+                            }
+                        } else {
+                            py::clearError();
+                        }
+                    } else {
+                        py::clearError();
+                    }
+                }
             }
         }
     }
 
-    sendMessage(
-        DAPMessageBuilder::response(
-            seq,
-            "evaluate",
-            true,
-            {
-                {            "result", result},
-                {              "type",   type},
-                {"variablesReference", varRef}
+    if (isError && isRepl) {
+        sendMessage(
+            DAPMessageBuilder::response(
+                seq,
+                "evaluate",
+                false,
+                {
+                    {"error", {{"id", seq}, {"format", result}, {"showUser", false}}}
+        },
+                result
+            )
+        );
+    } else {
+        sendMessage(
+            DAPMessageBuilder::response(
+                seq,
+                "evaluate",
+                true,
+                {
+                    {            "result", result},
+                    {              "type",   type},
+                    {"variablesReference", varRef}
+        }
+            )
+        );
     }
-        )
+}
+
+void DAPDebugger::processSetVariable(int seq, const json& args) {
+    int         varRef = args.value("variablesReference", 0);
+    std::string name   = args.value("name", "");
+    std::string value  = args.value("value", "");
+
+    if (state_ != DebuggerState::Stopped) {
+        sendMessage(
+            DAPMessageBuilder::response(
+                seq,
+                "setVariable",
+                false,
+                {
+                    {"message", "Cannot set variable while running."}
+        }
+            )
+        );
+        return;
+    }
+
+    // 结果变量
+    bool        success = false;
+    std::string errorMsg;
+    std::string resultStr;
+    std::string typeStr;
+    int         newVarRef = 0;
+
+    // 创建完成通知
+    auto completion = std::make_shared<std::promise<void>>();
+    auto future     = completion->get_future();
+
+    // 提交任务到主线程执行
+    {
+        std::lock_guard<std::mutex> lock(taskQueueMutex_);
+        taskQueue_.push(
+            {[this, varRef, name, value, &success, &errorMsg, &resultStr, &typeStr, &newVarRef]() {
+                 std::lock_guard<std::mutex> frameLock(frameMutex_);
+
+                 auto it = variableRefs_.find(varRef);
+                 if (it == variableRefs_.end()) {
+                     errorMsg = "Invalid variable reference.";
+                     return;
+                 }
+
+                 const VariableRef& ref        = it->second;
+                 PyHandle           targetDict = nullptr;
+                 PyFrameHandle      frame      = nullptr;
+
+                 // 获取目标字典
+                 switch (ref.type) {
+                 case VariableRefType::Locals:
+                 case VariableRefType::Globals: {
+                     for (const auto& sf : stackFrames_) {
+                         if (sf.id == ref.frameId) {
+                             frame = sf.pyFrame;
+                             break;
+                         }
+                     }
+                     if (frame) {
+                         py::frameToLocals(frame);
+                         py::FrameInfo info = py::getFrameInfo(frame);
+                         targetDict         = (ref.type == VariableRefType::Locals) ? info.locals : info.globals;
+                     }
+                     break;
+                 }
+                 case VariableRefType::Object: {
+                     if (py::isDict(ref.object)) {
+                         targetDict = ref.object;
+                     }
+                     break;
+                 }
+                 }
+
+                 if (!targetDict || !py::isDict(targetDict)) {
+                     errorMsg = "Cannot modify this variable container.";
+                     return;
+                 }
+
+                 // 编译并执行新值表达式
+                 py::ObjectGuard code(py::compile(value.c_str(), "<setvar>", py::getEvalInputMode()));
+                 if (!code) {
+                     py::clearError();
+                     errorMsg = "Invalid value expression.";
+                     return;
+                 }
+
+                 // 获取用于求值的 globals
+                 PyHandle evalGlobals = targetDict;
+                 if (frame) {
+                     py::FrameInfo info = py::getFrameInfo(frame);
+                     evalGlobals        = info.globals;
+                 }
+
+                 py::ObjectGuard newValue(py::evalCode(code.get(), evalGlobals, targetDict));
+                 if (!newValue) {
+                     py::clearError();
+                     errorMsg = "Failed to evaluate value expression.";
+                     return;
+                 }
+
+                 // 设置新值
+                 if (py::dictSetItemString(targetDict, name.c_str(), newValue.get()) != 0) {
+                     py::clearError();
+                     errorMsg = "Failed to set variable.";
+                     return;
+                 }
+
+                 // 如果是修改 frame 的 locals，同步回 fast locals
+                 if (frame && ref.type == VariableRefType::Locals) {
+                     py::localsToFast(frame);
+                 }
+
+                 // 返回新值信息
+                 resultStr = py::getRepr(newValue.get(), dap::kMaxEvalResultLength);
+                 typeStr   = py::getTypeName(newValue.get());
+
+                 if (py::isExpandable(newValue.get())) {
+                     newVarRef = registerVariableReference(newValue.release());
+                 }
+
+                 success = true;
+             },
+             completion}
+        );
+    }
+    taskQueueCV_.notify_one();
+
+    // 等待任务完成
+    future.wait();
+
+    // 发送响应
+    if (success) {
+        sendMessage(
+            DAPMessageBuilder::response(
+                seq,
+                "setVariable",
+                true,
+                {
+                    {             "value", resultStr},
+                    {              "type",   typeStr},
+                    {"variablesReference", newVarRef}
+        }
+            )
+        );
+    } else {
+        sendMessage(
+            DAPMessageBuilder::response(
+                seq,
+                "setVariable",
+                false,
+                {
+                    {"message", errorMsg}
+        }
+            )
+        );
+    }
+}
+
+void DAPDebugger::processCompletions(int seq, const json& args) {
+    std::string text   = args.value("text", "");
+    int         column = args.value("column", 0); // 1-based by default in DAP
+    int         line   = args.value("line", 1);
+
+    json targets = json::array();
+
+    int cursorPos = column - 1;
+    if (cursorPos < 0) cursorPos = 0;
+    if (cursorPos > static_cast<int>(text.size())) cursorPos = static_cast<int>(text.size());
+
+    std::string prefix = text.substr(0, cursorPos);
+
+    size_t dotPos     = prefix.rfind('.');
+    size_t identStart = prefix.find_last_of(" \t\n\r(,=[{:+-*/%<>!&|^~");
+    if (identStart == std::string::npos) {
+        identStart = 0;
+    } else {
+        identStart++;
+    }
+
+    std::string completionPrefix;
+    int         replaceStart  = 0; // 0-based position where replacement starts
+    int         replaceLength = 0; // how many characters to replace
+    PyHandle    targetObj     = nullptr;
+    bool        needDecref    = false;
+
+    if (dotPos != std::string::npos && dotPos >= identStart) {
+        std::string objExpr = prefix.substr(identStart, dotPos - identStart);
+        completionPrefix    = prefix.substr(dotPos + 1);
+        replaceStart        = static_cast<int>(dotPos + 1);
+        replaceLength       = static_cast<int>(completionPrefix.size());
+
+        if (state_ == DebuggerState::Stopped) {
+            PyFrameHandle frame   = nullptr;
+            PyHandle      globals = nullptr;
+            PyHandle      locals  = nullptr;
+
+            {
+                std::lock_guard<std::mutex> lock(frameMutex_);
+                if (currentFrame_) {
+                    frame = currentFrame_;
+                } else if (!stackFrames_.empty()) {
+                    frame = stackFrames_.front().pyFrame;
+                }
+            }
+
+            if (frame) {
+                py::frameToLocals(frame);
+                py::FrameInfo info = py::getFrameInfo(frame);
+                locals             = info.locals;
+                globals            = info.globals;
+
+                if (globals) {
+                    py::ObjectGuard code(py::compile(objExpr.c_str(), "<completion>", py::getEvalInputMode()));
+                    if (code) {
+                        PyHandle result = py::evalCode(code.get(), globals, locals ? locals : globals);
+                        if (result) {
+                            targetObj  = result;
+                            needDecref = true;
+                        }
+                    }
+                    py::clearError();
+                }
+            }
+        } else {
+            py::GILGuard gil;
+            PyHandle     mainModule = py::importAddModule("__main__");
+            PyHandle     globals    = mainModule ? py::moduleGetDict(mainModule) : nullptr;
+
+            if (globals) {
+                py::ObjectGuard code(py::compile(objExpr.c_str(), "<completion>", py::getEvalInputMode()));
+                if (code) {
+                    PyHandle result = py::evalCode(code.get(), globals, globals);
+                    if (result) {
+                        targetObj  = result;
+                        needDecref = true;
+                    }
+                }
+                py::clearError();
+            }
+
+            if (targetObj) {
+                auto completions = py::getCompletions(targetObj, completionPrefix);
+                for (const auto& name : completions) {
+                    std::string type = "property";
+                    if (name.find("__") == 0) {
+                        type = "keyword";
+                    }
+                    targets.push_back({
+                        { "label",             name},
+                        {  "type",             type},
+                        { "start", replaceStart + 1},
+                        {"length",    replaceLength}
+                    });
+                }
+
+                if (needDecref) {
+                    py::decref(targetObj);
+                }
+                targetObj = nullptr;
+            }
+        }
+    } else {
+        completionPrefix = prefix.substr(identStart);
+        replaceStart     = static_cast<int>(identStart);
+        replaceLength    = static_cast<int>(completionPrefix.size());
+
+        static const std::vector<std::string> keywords = {
+            "and",  "as",      "assert", "break", "class",  "continue", "def",    "del",  "elif", "else",   "except",
+            "exec", "finally", "for",    "from",  "global", "if",       "import", "in",   "is",   "lambda", "not",
+            "or",   "pass",    "print",  "raise", "return", "try",      "while",  "with", "yield"
+        };
+
+        auto addKeywords = [&](int& sortIndex) {
+            for (const auto& kw : keywords) {
+                if (completionPrefix.empty() || kw.find(completionPrefix) == 0) {
+                    targets.push_back({
+                        { "label",               kw},
+                        {  "type",        "keyword"},
+                        { "start", replaceStart + 1},
+                        {"length",    replaceLength}
+                    });
+                    sortIndex++;
+                }
+            }
+        };
+
+        auto addBuiltins = [&](int& sortIndex) {
+            PyHandle mainModule = py::importAddModule("__main__");
+            if (!mainModule) return;
+
+            PyHandle mainDir = py::dir(mainModule);
+            if (!mainDir || !py::isList(mainDir)) return;
+
+            PyHandle  builtins    = nullptr;
+            long long mainDirSize = py::listSize(mainDir);
+            for (long long i = 0; i < mainDirSize; i++) {
+                PyHandle attrName = py::listGetItem(mainDir, i);
+                if (attrName && py::isString(attrName) && py::asString(attrName) == "__builtins__") {
+                    builtins = py::getAttr(mainModule, attrName);
+                    break;
+                }
+            }
+            py::decref(mainDir);
+
+            if (!builtins) return;
+
+            PyHandle builtinsDir = py::dir(builtins);
+            if (builtinsDir && py::isList(builtinsDir)) {
+                long long size = py::listSize(builtinsDir);
+                for (long long i = 0; i < size; i++) {
+                    PyHandle attrName = py::listGetItem(builtinsDir, i);
+                    if (!attrName || !py::isString(attrName)) continue;
+
+                    std::string name = py::asString(attrName);
+                    if (!name.empty() && name[0] == '_' && name != "__import__") continue;
+                    if (!completionPrefix.empty() && name.find(completionPrefix) != 0) continue;
+
+                    PyHandle    value = py::getAttr(builtins, attrName);
+                    std::string type  = (value && py::isType(value)) ? "class" : "function";
+                    if (value) py::decref(value);
+
+                    targets.push_back({
+                        { "label",             name},
+                        {  "type",             type},
+                        { "start", replaceStart + 1},
+                        {"length",    replaceLength}
+                    });
+                }
+                py::decref(builtinsDir);
+            }
+            py::decref(builtins);
+            py::clearError();
+        };
+
+        if (state_ == DebuggerState::Stopped) {
+            std::lock_guard<std::mutex> lock(frameMutex_);
+            PyFrameHandle               frame = nullptr;
+            if (currentFrame_) {
+                frame = currentFrame_;
+            } else if (!stackFrames_.empty()) {
+                frame = stackFrames_.front().pyFrame;
+            }
+
+            int sortIndex = 0;
+
+            if (frame) {
+                py::frameToLocals(frame);
+                py::FrameInfo info = py::getFrameInfo(frame);
+
+                // 从 locals 收集
+                if (info.locals) {
+                    auto keys = py::getDictKeys(info.locals);
+                    for (const auto& key : keys) {
+                        if (completionPrefix.empty() || key.find(completionPrefix) == 0) {
+                            targets.push_back({
+                                { "label",              key},
+                                {  "type",       "variable"},
+                                { "start", replaceStart + 1},
+                                {"length",    replaceLength}
+                            });
+                        }
+                    }
+                }
+
+                // 从 globals 收集
+                if (info.globals && info.globals != info.locals) {
+                    auto keys = py::getDictKeys(info.globals);
+                    for (const auto& key : keys) {
+                        if (completionPrefix.empty() || key.find(completionPrefix) == 0) {
+                            targets.push_back({
+                                { "label",              key},
+                                {  "type",       "variable"},
+                                { "start", replaceStart + 1},
+                                {"length",    replaceLength}
+                            });
+                        }
+                    }
+                }
+            }
+
+            addKeywords(sortIndex);
+
+            if (frame) {
+                addBuiltins(sortIndex);
+            }
+        } else {
+            py::GILGuard gil;
+            PyHandle     mainModule = py::importAddModule("__main__");
+            PyHandle     globals    = mainModule ? py::moduleGetDict(mainModule) : nullptr;
+
+            if (globals) {
+                auto keys = py::getDictKeys(globals);
+                for (const auto& key : keys) {
+                    if (completionPrefix.empty() || key.find(completionPrefix) == 0) {
+                        targets.push_back({
+                            { "label",              key},
+                            {  "type",       "variable"},
+                            { "start", replaceStart + 1},
+                            {"length",    replaceLength}
+                        });
+                    }
+                }
+            }
+
+            int sortIndex = 0;
+            addKeywords(sortIndex);
+            addBuiltins(sortIndex);
+        }
+    }
+
+    if (targetObj) {
+        auto completions = py::getCompletions(targetObj, completionPrefix);
+        for (const auto& name : completions) {
+            std::string type = "property";
+            if (name.find("__") == 0) {
+                type = "keyword";
+            }
+            targets.push_back({
+                { "label",             name},
+                {  "type",             type},
+                { "start", replaceStart + 1},
+                {"length",    replaceLength}
+            });
+        }
+
+        if (needDecref) {
+            py::decref(targetObj);
+        }
+    }
+
+    json response = DAPMessageBuilder::response(
+        seq,
+        "completions",
+        true,
+        {
+            {"targets", targets}
+    }
     );
+
+    std::cout << "[Completions] Response: " << response.dump() << std::endl;
+
+    sendMessage(response);
 }
 
 void DAPDebugger::processDisconnect(int seq, const json& /*args*/) {
@@ -790,8 +1484,8 @@ bool DAPDebugger::hasBreakpoint(const std::string& source) {
 bool DAPDebugger::hasBreakpointInCurrentFrame() { return hasBreakpoint(cachedFilename_); }
 
 int DAPDebugger::registerVariableReference(PyHandle obj) {
-    int ref            = dap::kVariableRefBase + nextVarRef_++;
-    variableRefs_[ref] = obj;
+    int ref            = nextVarRef_++;
+    variableRefs_[ref] = {VariableRefType::Object, 0, obj};
     return ref;
 }
 
@@ -900,18 +1594,39 @@ json DAPDebugger::getVariablesFromObject(PyHandle obj) {
     return variables;
 }
 
-void DAPDebugger::waitForCommand() {
-    std::unique_lock<std::mutex> lock(commandMutex_);
-    commandReceived_ = false;
-    commandCV_.wait(lock, [this] { return commandReceived_.load(); });
+void DAPDebugger::waitForCommand() { debuggerLoop(); }
+
+void DAPDebugger::debuggerLoop() {
+    // 主线程在断点处调用此函数，循环处理来自调试器线程的任务
+    shouldContinue_ = false;
+
+    while (!shouldContinue_.load()) {
+        std::unique_lock<std::mutex> lock(taskQueueMutex_);
+
+        taskQueueCV_.wait(lock, [this] { return !taskQueue_.empty() || shouldContinue_.load(); });
+
+        if (shouldContinue_.load()) {
+            break;
+        }
+
+        if (!taskQueue_.empty()) {
+            auto pendingTask = std::move(taskQueue_.front());
+            taskQueue_.pop();
+            lock.unlock();
+
+            pendingTask.task();
+
+            if (pendingTask.completion) {
+                pendingTask.completion->set_value();
+            }
+        }
+    }
 }
 
 void DAPDebugger::notifyCommandReceived() {
-    {
-        std::lock_guard<std::mutex> lock(commandMutex_);
-        commandReceived_ = true;
-    }
-    commandCV_.notify_all();
+    // 设置继续标志并唤醒主线程
+    shouldContinue_ = true;
+    taskQueueCV_.notify_all();
 }
 
 void DAPDebugger::onFrameEnter(PyFrameHandle frame) {
@@ -924,6 +1639,7 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
     if (state_ == DebuggerState::Terminated || state_ == DebuggerState::Disconnected) {
         return;
     }
+
     std::string source;
     if (frame == cachedFrame_) {
         source = cachedFilename_;
@@ -977,11 +1693,7 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
     stepMode_      = StepMode::None;
 
     // 清除旧的变量引用
-    for (auto& [ref, obj] : variableRefs_) {
-        py::xdecref(obj);
-    }
-    variableRefs_.clear();
-    nextVarRef_ = 1;
+    clearVariableReferences();
 
     // 构建堆栈帧
     {

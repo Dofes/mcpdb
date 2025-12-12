@@ -11,6 +11,9 @@
 #include <condition_variable>
 #include <atomic>
 #include <thread>
+#include <functional>
+#include <queue>
+#include <future>
 
 using json = nlohmann::json;
 
@@ -21,12 +24,16 @@ constexpr int kMaxStackFrames      = 50;
 constexpr int kMaxVariables        = 100;
 constexpr int kMaxValueLength      = 200;
 constexpr int kMaxEvalResultLength = 500;
-constexpr int kScopeMultiplier     = 1000;
-constexpr int kVariableRefBase     = 10000;
-constexpr int kLocalsScopeOffset   = 1;
-constexpr int kGlobalsScopeOffset  = 2;
 
 } // namespace dap
+
+enum class VariableRefType { Locals, Globals, Object };
+
+struct VariableRef {
+    VariableRefType type    = VariableRefType::Object;
+    int             frameId = 0;
+    PyHandle        object  = nullptr;
+};
 
 struct Breakpoint {
     int         id = 0;
@@ -98,6 +105,8 @@ void        clearPathMapping();
 class DAPMessageBuilder {
 public:
     static json response(int requestSeq, const std::string& command, bool success, const json& body = nullptr);
+    static json
+    response(int requestSeq, const std::string& command, bool success, const json& body, const std::string& message);
     static json event(const std::string& eventName, const json& body = nullptr);
     static int  nextSeq();
 };
@@ -159,10 +168,13 @@ private:
     void processStepOut(int seq, const json& args);
     void processPause(int seq, const json& args);
     void processEvaluate(int seq, const json& args);
+    void processSetVariable(int seq, const json& args);
+    void processCompletions(int seq, const json& args);
     void processDisconnect(int seq, const json& args);
 
     // 变量处理
     int  registerVariableReference(PyHandle obj);
+    void clearVariableReferences();
     json getVariablesFromDict(PyHandle dict);
     json getVariablesFromList(PyHandle list);
     json getVariablesFromTuple(PyHandle tuple);
@@ -172,6 +184,13 @@ private:
     // 同步
     void waitForCommand();
     void notifyCommandReceived();
+
+    // 主线程执行循环（在断点处调用）
+    void debuggerLoop();
+
+    // 提交任务到主线程执行
+    template <typename F>
+    auto submitToMainThread(F&& func) -> decltype(func());
 
     // 状态
     std::atomic<DebuggerState> state_{DebuggerState::Disconnected};
@@ -187,8 +206,8 @@ private:
     int                     nextFrameId_ = 1;
 
     // 变量引用
-    std::unordered_map<int, PyHandle> variableRefs_;
-    int                               nextVarRef_ = 1;
+    std::unordered_map<int, VariableRef> variableRefs_;
+    int                                  nextVarRef_ = 1;
 
     // 当前状态
     PyFrameHandle currentFrame_ = nullptr;
@@ -213,6 +232,16 @@ private:
     std::mutex              commandMutex_;
     std::condition_variable commandCV_;
     std::atomic<bool>       commandReceived_{false};
+
+    // 主线程任务队列
+    struct PendingTask {
+        std::function<void()>               task;
+        std::shared_ptr<std::promise<void>> completion;
+    };
+    std::queue<PendingTask> taskQueue_;
+    std::mutex              taskQueueMutex_;
+    std::condition_variable taskQueueCV_;
+    std::atomic<bool>       shouldContinue_{false};
 
     // 服务器启动同步
     std::mutex              serverStartMutex_;

@@ -12,6 +12,12 @@
 
 namespace py {
 
+// ============== GIL 管理 ==============
+
+GILGuard::GILGuard() : state_(PyGILState_Ensure()) {}
+
+GILGuard::~GILGuard() { PyGILState_Release(static_cast<PyGILState_STATE>(state_)); }
+
 // ============== 动态类型获取==============
 
 struct TypeCache {
@@ -156,6 +162,7 @@ bool isDict(PyHandle obj) { return obj && PyDict_Check(PY(obj)); }
 bool isList(PyHandle obj) { return obj && PyList_Check(PY(obj)); }
 bool isTuple(PyHandle obj) { return obj && PyTuple_Check(PY(obj)); }
 bool isModule(PyHandle obj) { return obj && dynModuleCheck(PY(obj)); }
+bool isType(PyHandle obj) { return obj && PyType_Check(PY(obj)); }
 
 // ============== 字符串操作 ==============
 
@@ -260,6 +267,16 @@ PyHandle moduleGetDict(PyHandle module) {
     return HANDLE(PyModule_GetDict(PY(module)));
 }
 
+PyHandle importAddModule(const char* name) {
+    if (!name) return nullptr;
+    return HANDLE(PyImport_AddModule(name));
+}
+
+PyHandle importModule(const char* name) {
+    if (!name) return nullptr;
+    return HANDLE(PyImport_ImportModule(name));
+}
+
 // ============== 帧操作 ==============
 
 FrameInfo getFrameInfo(PyFrameHandle frame) {
@@ -300,10 +317,30 @@ void frameToLocals(PyFrameHandle frame) {
     }
 }
 
+void localsToFast(PyFrameHandle frame) {
+    PyFrameObject* f = FRAME(frame);
+    if (f) {
+        PyFrame_LocalsToFast(f, 0);
+    }
+}
+
 PyFrameHandle getFrameBack(PyFrameHandle frame) {
     PyFrameObject* f = FRAME(frame);
     if (!f) return nullptr;
     return HANDLE(f->f_back);
+}
+
+// ============== 字典操作 ==============
+
+int dictSetItemString(PyHandle dict, const char* key, PyHandle value) {
+    if (!dict || !key || !value) return -1;
+    return PyDict_SetItemString(PY(dict), key, PY(value));
+}
+
+void dictDelItemString(PyHandle dict, const char* key) {
+    if (!dict || !key) return;
+    PyDict_DelItemString(PY(dict), key);
+    PyErr_Clear(); // 忽略 key 不存在的错误
 }
 
 // ============== 代码执行 ==============
@@ -321,6 +358,330 @@ PyHandle evalCode(PyCodeHandle code, PyHandle globals, PyHandle locals) {
 void clearError() { PyErr_Clear(); }
 
 int getEvalInputMode() { return Py_eval_input; }
+int getSingleInputMode() { return Py_single_input; }
+
+// 辅助函数：格式化 Python 异常为字符串
+static std::string formatPythonException() {
+    std::string result;
+
+    PyObject* ptype      = nullptr;
+    PyObject* pvalue     = nullptr;
+    PyObject* ptraceback = nullptr;
+    PyErr_Fetch(&ptype, &pvalue, &ptraceback);
+
+    if (!ptype && !pvalue) {
+        return "Unknown error";
+    }
+
+    PyErr_NormalizeException(&ptype, &pvalue, &ptraceback);
+
+    // 尝试使用 traceback.format_exception 获取完整的错误信息
+    // 使用 PyImport_AddModule 避免重新导入可能导致的问题（返回借用引用）
+    PyObject* tbModule         = PyImport_AddModule("traceback");
+    bool      needDecrefModule = false;
+
+    if (!tbModule) {
+        // 如果 traceback 还没被导入，尝试导入它（返回新引用）
+        PyErr_Clear();
+        tbModule         = PyImport_ImportModule("traceback");
+        needDecrefModule = (tbModule != nullptr);
+    }
+
+    if (tbModule) {
+        PyObject* formatFunc = PyObject_GetAttrString(tbModule, "format_exception");
+        if (formatFunc) {
+            PyObject* args = PyTuple_Pack(
+                3,
+                ptype ? ptype : getDynNone(),
+                pvalue ? pvalue : getDynNone(),
+                ptraceback ? ptraceback : getDynNone()
+            );
+            if (args) {
+                PyObject* tbList = PyObject_CallObject(formatFunc, args);
+                if (tbList && PyList_Check(tbList)) {
+                    Py_ssize_t size = PyList_Size(tbList);
+                    for (Py_ssize_t i = 0; i < size; i++) {
+                        PyObject* line = PyList_GetItem(tbList, i);
+                        if (line) {
+                            result += getString(HANDLE(line));
+                        }
+                    }
+                }
+                PyErr_Clear(); // 清除可能的错误
+                if (tbList) Py_DECREF(tbList);
+                Py_DECREF(args);
+            }
+            Py_DECREF(formatFunc);
+        } else {
+            PyErr_Clear();
+        }
+        if (needDecrefModule) {
+            Py_DECREF(tbModule);
+        }
+    } else {
+        PyErr_Clear();
+    }
+
+    // 如果 traceback 模块失败，回退到简单的错误信息
+    if (result.empty() && pvalue) {
+        PyObject* str = PyObject_Str(pvalue);
+        if (str) {
+            result = getString(HANDLE(str));
+            Py_DECREF(str);
+        } else {
+            PyErr_Clear();
+            result = "Error occurred";
+        }
+    }
+
+    if (ptype) Py_DECREF(ptype);
+    if (pvalue) Py_DECREF(pvalue);
+    if (ptraceback) Py_XDECREF(ptraceback);
+
+    // 移除尾部换行
+    while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) {
+        result.pop_back();
+    }
+
+    return result;
+}
+
+// 辅助函数：捕获 stdout/stderr 并执行代码，返回执行结果和错误状态
+static REPLResult execWithCapture(PyObject* code, PyHandle globals, PyHandle locals) {
+    REPLResult result;
+    result.isError      = false;
+    result.resultObject = nullptr;
+
+    // 获取 sys 模块
+    PyObject* sysModule = PyImport_AddModule("sys");
+    if (!sysModule) {
+        PyErr_Clear();
+        PyObject* evalResult = PyEval_EvalCode(CODE(code), PY(globals), PY(locals));
+        if (evalResult) {
+            Py_DECREF(evalResult);
+        } else {
+            result.output  = formatPythonException();
+            result.isError = true;
+            PyErr_Clear();
+        }
+        return result;
+    }
+
+    // 保存原始 stdout/stderr
+    PyObject* oldStdout = PyObject_GetAttrString(sysModule, "stdout");
+    PyObject* oldStderr = PyObject_GetAttrString(sysModule, "stderr");
+
+    // 尝试创建 StringIO (兼容 Python 2 和 3)
+    PyObject* stringIO = nullptr;
+
+    // Python 2: from StringIO import StringIO
+    // Python 3: from io import StringIO
+    // 但由于嵌入式 Python 可能是 2.x，先尝试 cStringIO（更快），再 StringIO，最后 io
+    PyObject* ioModule = PyImport_ImportModule("cStringIO");
+    if (ioModule) {
+        // cStringIO.StringIO 是一个工厂函数，直接调用
+        PyObject* stringIOFunc = PyObject_GetAttrString(ioModule, "StringIO");
+        if (stringIOFunc) {
+            stringIO = PyObject_CallObject(stringIOFunc, nullptr);
+            Py_DECREF(stringIOFunc);
+        }
+        Py_DECREF(ioModule);
+    }
+
+    if (!stringIO) {
+        PyErr_Clear();
+        ioModule = PyImport_ImportModule("StringIO");
+        if (ioModule) {
+            // Python 2 的 StringIO.StringIO
+            PyObject* stringIOClass = PyObject_GetAttrString(ioModule, "StringIO");
+            if (stringIOClass) {
+                stringIO = PyObject_CallObject(stringIOClass, nullptr);
+                Py_DECREF(stringIOClass);
+            }
+            Py_DECREF(ioModule);
+        }
+    }
+
+    if (!stringIO) {
+        PyErr_Clear();
+        ioModule = PyImport_ImportModule("io");
+        if (ioModule) {
+            // Python 3 的 io.StringIO
+            PyObject* stringIOClass = PyObject_GetAttrString(ioModule, "StringIO");
+            if (stringIOClass) {
+                stringIO = PyObject_CallObject(stringIOClass, nullptr);
+                Py_DECREF(stringIOClass);
+            }
+            Py_DECREF(ioModule);
+        }
+    }
+
+    if (!stringIO) {
+        PyErr_Clear();
+    }
+
+    // 重定向 stdout/stderr
+    if (stringIO) {
+        PyObject_SetAttrString(sysModule, "stdout", stringIO);
+        PyObject_SetAttrString(sysModule, "stderr", stringIO);
+    }
+
+    // 执行代码
+    bool      execFailed = false;
+    PyObject* ptype      = nullptr;
+    PyObject* pvalue     = nullptr;
+    PyObject* ptraceback = nullptr;
+
+    PyObject* evalResult = PyEval_EvalCode(CODE(code), PY(globals), PY(locals));
+
+    if (evalResult) {
+        Py_DECREF(evalResult);
+    } else {
+        execFailed     = true;
+        result.isError = true;
+        // 立即保存异常信息，防止后续操作清除它
+        PyErr_Fetch(&ptype, &pvalue, &ptraceback);
+    }
+
+    // 获取捕获的输出（仅成功时）
+    if (stringIO && !execFailed) {
+        PyObject* getvalue = PyObject_GetAttrString(stringIO, "getvalue");
+        if (getvalue) {
+            PyObject* output = PyObject_CallObject(getvalue, nullptr);
+            if (output) {
+                result.output = getString(HANDLE(output));
+                Py_DECREF(output);
+            }
+            Py_DECREF(getvalue);
+        }
+    }
+
+    // 恢复 stdout/stderr
+    if (stringIO) {
+        if (oldStdout) {
+            PyObject_SetAttrString(sysModule, "stdout", oldStdout);
+        }
+        if (oldStderr) {
+            PyObject_SetAttrString(sysModule, "stderr", oldStderr);
+        }
+        Py_DECREF(stringIO);
+    }
+
+    if (oldStdout) Py_DECREF(oldStdout);
+    if (oldStderr) Py_DECREF(oldStderr);
+
+    // 在恢复 stdout/stderr 之后格式化异常
+    if (execFailed) {
+        // 恢复异常状态，然后格式化
+        PyErr_Restore(ptype, pvalue, ptraceback);
+        result.output = formatPythonException();
+    }
+
+    // 移除尾部换行
+    while (!result.output.empty() && (result.output.back() == '\n' || result.output.back() == '\r')) {
+        result.output.pop_back();
+    }
+
+    return result;
+}
+
+// 执行 REPL 代码，返回结果字符串或捕获的输出
+REPLResult execREPL(const char* source, PyHandle globals, PyHandle locals) {
+    REPLResult result;
+    result.isError      = false;
+    result.resultObject = nullptr;
+
+    // 首先尝试作为表达式编译
+    PyObject* code = Py_CompileString(source, "<repl>", Py_eval_input);
+    if (code) {
+        // 成功编译为表达式，执行并获取结果
+        PyObject* evalResult = PyEval_EvalCode(CODE(code), PY(globals), PY(locals));
+        Py_DECREF(code);
+
+        if (evalResult) {
+            // 如果结果不是 None，返回其 repr 并保留对象引用
+            if (evalResult != getDynNone()) {
+                result.output       = getRepr(HANDLE(evalResult), 10000);
+                result.resultType   = getTypeName(HANDLE(evalResult));
+                result.resultObject = HANDLE(evalResult); // 保留引用，由调用者负责 decref
+            } else {
+                Py_DECREF(evalResult);
+            }
+        } else {
+            // 执行出错，获取完整的错误信息
+            result.output  = formatPythonException();
+            result.isError = true;
+        }
+        return result;
+    }
+
+    // 表达式编译失败，清除错误，尝试作为语句编译
+    PyErr_Clear();
+
+    code = Py_CompileString(source, "<repl>", Py_single_input);
+    if (code) {
+        // 语句可能有 print 输出，需要捕获
+        result = execWithCapture(code, globals, locals);
+        Py_DECREF(code);
+    } else {
+        // 语句也编译失败，获取完整的错误信息
+        result.output  = formatPythonException();
+        result.isError = true;
+    }
+
+    return result;
+}
+
+// ============== 自动补全 ==============
+
+std::vector<std::string> getCompletions(PyHandle obj, const std::string& prefix) {
+    std::vector<std::string> completions;
+
+    PyObject* dirList = PyObject_Dir(PY(obj));
+    if (!dirList) {
+        PyErr_Clear();
+        return completions;
+    }
+
+    if (PyList_Check(dirList)) {
+        Py_ssize_t size = PyList_Size(dirList);
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject* item = PyList_GetItem(dirList, i);
+            if (item) {
+                std::string name = getString(HANDLE(item));
+                if (prefix.empty() || name.find(prefix) == 0) {
+                    completions.push_back(name);
+                }
+            }
+        }
+    }
+
+    Py_DECREF(dirList);
+    return completions;
+}
+
+std::vector<std::string> getDictKeys(PyHandle dict) {
+    std::vector<std::string> keys;
+
+    if (!dict || !PyDict_Check(PY(dict))) {
+        return keys;
+    }
+
+    Py_ssize_t pos   = 0;
+    PyObject*  key   = nullptr;
+    PyObject*  value = nullptr;
+
+    while (PyDict_Next(PY(dict), &pos, &key, &value)) {
+        if (key) {
+            std::string keyStr = getString(HANDLE(key));
+            if (!keyStr.empty()) {
+                keys.push_back(keyStr);
+            }
+        }
+    }
+
+    return keys;
+}
 
 // ============== 高级工具函数 ==============
 
