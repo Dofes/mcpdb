@@ -433,6 +433,7 @@ void DAPDebugger::processInitialize(int seq, const json& /*args*/) {
         {      "supportsFunctionBreakpoints",      false},
         {   "supportsConditionalBreakpoints",       true},
         {"supportsHitConditionalBreakpoints",      false},
+        {                "supportsLogPoints",       true},
         {        "supportsEvaluateForHovers",       true},
         {                 "supportsStepBack",      false},
         {              "supportsSetVariable",       true},
@@ -478,8 +479,9 @@ void DAPDebugger::processSetBreakpoints(int seq, const json& args) {
         for (const auto& bp : args["breakpoints"]) {
             int line = bp.value("line", 0);
             if (line > 0) {
-                std::string condition = bp.value("condition", "");
-                int         bpId      = setBreakpoint(sourcePath, line, condition);
+                std::string condition  = bp.value("condition", "");
+                std::string logMessage = bp.value("logMessage", "");
+                int         bpId       = setBreakpoint(sourcePath, line, condition, logMessage);
                 verifiedBreakpoints.push_back({
                     {      "id", bpId},
                     {"verified", true},
@@ -1469,17 +1471,23 @@ void DAPDebugger::processDisconnect(int seq, const json& /*args*/) {
     notifyCommandReceived();
 }
 
-int DAPDebugger::setBreakpoint(const std::string& source, int line, const std::string& condition) {
+int DAPDebugger::setBreakpoint(
+    const std::string& source,
+    int                line,
+    const std::string& condition,
+    const std::string& logMessage
+) {
     path_utils::registerPathMapping(source);
 
     std::lock_guard<std::mutex> lock(mBreakpointMutex);
 
     Breakpoint bp;
-    bp.id        = mNextBreakpointId++;
-    bp.source    = source;
-    bp.line      = line;
-    bp.verified  = true;
-    bp.condition = condition;
+    bp.id         = mNextBreakpointId++;
+    bp.source     = source;
+    bp.line       = line;
+    bp.verified   = true;
+    bp.condition  = condition;
+    bp.logMessage = logMessage;
 
     mBreakpoints[source].push_back(bp);
 
@@ -1728,7 +1736,7 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
     if (bp) {
         bool conditionMet = true;
 
-        // 如果有条件，评估条件表达式
+        // 如果有条件，先评估条件表达式
         if (!bp->condition.empty()) {
             py::frameToLocals(frame);
             py::FrameInfo info = py::getFrameInfo(frame);
@@ -1767,7 +1775,28 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
             }
         }
 
+        // 条件满足（或无条件）时处理断点
         if (conditionMet) {
+            // 如果有 logMessage，输出日志但不停止执行
+            if (!bp->logMessage.empty()) {
+                py::frameToLocals(frame);
+                py::FrameInfo info   = py::getFrameInfo(frame);
+                std::string   output = formatLogMessage(bp->logMessage, info.globals, info.locals);
+
+                sendMessage(
+                    DAPMessageBuilder::event(
+                        "output",
+                        {
+                            {"category",     "console"},
+                            {  "output", output + "\n"}
+                }
+                    )
+                );
+
+                return; // 日志断点不停止执行
+            }
+
+            // 普通断点，停止执行
             shouldStop = true;
             stopReason = "breakpoint";
         }
@@ -1849,6 +1878,45 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
 
     // 等待调试命令
     waitForCommand();
+}
+
+std::string DAPDebugger::formatLogMessage(const std::string& message, PyHandle globals, PyHandle locals) {
+    std::string result = message;
+    size_t      pos    = 0;
+
+    while ((pos = result.find('{', pos)) != std::string::npos) {
+        size_t endPos = result.find('}', pos);
+        if (endPos == std::string::npos) {
+            break;
+        }
+
+        std::string expr = result.substr(pos + 1, endPos - pos - 1);
+        if (expr.empty()) {
+            pos = endPos + 1;
+            continue;
+        }
+
+        // 求值表达式
+        std::string     value = "undefined";
+        py::ObjectGuard code(py::compile(expr.c_str(), "<logpoint>", py::getEvalInputMode()));
+        if (code) {
+            py::ObjectGuard evalResult(py::evalCode(code.get(), globals, locals));
+            if (evalResult) {
+                value = py::getRepr(evalResult.get());
+            } else {
+                py::clearError();
+                value = "<error>";
+            }
+        } else {
+            py::clearError();
+            value = "<syntax error>";
+        }
+
+        result.replace(pos, endPos - pos + 1, value);
+        pos += value.length();
+    }
+
+    return result;
 }
 
 void DAPDebugger::onFrameExit(PyFrameHandle frame) {

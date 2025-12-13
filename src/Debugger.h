@@ -41,6 +41,7 @@ struct Breakpoint {
     int         line     = 0;
     bool        verified = false;
     std::string condition;
+    std::string logMessage;
 
     json toJson() const {
         return {
@@ -121,12 +122,18 @@ public:
 
     void handleRequest(const std::string& request);
 
-    int         setBreakpoint(const std::string& source, int line, const std::string& condition = "");
+    int setBreakpoint(
+        const std::string& source,
+        int                line,
+        const std::string& condition  = "",
+        const std::string& logMessage = ""
+    );
     void        clearBreakpoints(const std::string& source);
     bool        hasBreakpoint(const std::string& source, int line);
     bool        hasBreakpoint(const std::string& source);
     bool        hasBreakpointInCurrentFrame();
     Breakpoint* getBreakpoint(const std::string& source, int line);
+    std::string formatLogMessage(const std::string& message, PyHandle globals, PyHandle locals);
 
     // Python Hooks
     void onFrameEnter(PyFrameHandle frame);
