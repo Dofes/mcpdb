@@ -324,54 +324,54 @@ int main(int argc, char* argv[]) {
         }
         UniqueHandle processHandle(hProcess);
 
-        // 如果目标进程中已加载该 DLL，则退出
+        // 检查模块状态
         std::wstring dllFileName = fullDLLPath.filename().wstring();
         LPVOID       moduleBase  = GetModuleBaseAddress(processHandle.get(), dllFileName.c_str());
         if (moduleBase != nullptr) {
-            std::cout << "DLL 已加载，无需重复注入\n";
+            std::cout << "调试器已就绪\n";
             return EXIT_SUCCESS;
         }
 
-        // 创建共享内存，传递配置给DLL
+        // 初始化配置
         mcpdb::SharedConfig config;
         config.port = options.port;
 
         auto configResult = mcpdb::ConfigWriter::create(processId, config);
         if (!configResult) {
-            std::cerr << "警告: 无法创建共享配置: " << mcpdb::toString(configResult.error()) << std::endl;
-            // 继续执行，DLL会使用默认端口
+            std::cerr << "警告: 配置同步失败: " << mcpdb::toString(configResult.error()) << std::endl;
+            // 继续执行，使用默认端口
         } else {
-            std::cout << "配置已写入共享内存 (端口: " << config.port << ")\n";
+            std::cout << "调试端口: " << config.port << "\n";
         }
 
-        // 修补目标进程中的内存保护函数
+        // 准备运行环境
         if (!PatchZwProtectVirtualMemory(processId)) {
-            throw std::runtime_error("修补目标进程失败");
+            throw std::runtime_error("环境初始化失败");
         }
 
-        // 在目标进程中申请内存并写入 DLL 路径
+        // 准备模块数据
         const std::string dllPathStr = fullDLLPath.string();
         size_t            allocSize  = dllPathStr.size() + 1;
         LPVOID            remoteMemory =
             VirtualAllocEx(processHandle.get(), nullptr, allocSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!remoteMemory) {
-            throw std::runtime_error("VirtualAllocEx 失败");
+            throw std::runtime_error("内存分配失败");
         }
         if (!WriteProcessMemory(processHandle.get(), remoteMemory, dllPathStr.c_str(), allocSize, nullptr)) {
             VirtualFreeEx(processHandle.get(), remoteMemory, 0, MEM_RELEASE);
-            throw std::runtime_error("WriteProcessMemory 失败");
+            throw std::runtime_error("数据传输失败");
         }
 
-        // 获取 LoadLibraryA 地址并创建远程线程加载 DLL
+        // 加载调试模块
         HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
         if (!hKernel32) {
             VirtualFreeEx(processHandle.get(), remoteMemory, 0, MEM_RELEASE);
-            throw std::runtime_error("获取 kernel32.dll 句柄失败");
+            throw std::runtime_error("系统模块获取失败");
         }
         auto loadLibraryAddr = reinterpret_cast<LPVOID>(GetProcAddress(hKernel32, "LoadLibraryA"));
         if (!loadLibraryAddr) {
             VirtualFreeEx(processHandle.get(), remoteMemory, 0, MEM_RELEASE);
-            throw std::runtime_error("获取 LoadLibraryA 地址失败");
+            throw std::runtime_error("入口点定位失败");
         }
         HANDLE hRemoteThread = CreateRemoteThread(
             processHandle.get(),
@@ -384,7 +384,7 @@ int main(int argc, char* argv[]) {
         );
         if (!hRemoteThread) {
             VirtualFreeEx(processHandle.get(), remoteMemory, 0, MEM_RELEASE);
-            throw std::runtime_error("CreateRemoteThread 失败");
+            throw std::runtime_error("模块加载失败");
         }
         UniqueHandle remoteThreadHandle(hRemoteThread);
 
@@ -400,6 +400,6 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    std::cout << "注入成功" << std::endl;
+    std::cout << "调试器初始化完成" << std::endl;
     return EXIT_SUCCESS;
 }
