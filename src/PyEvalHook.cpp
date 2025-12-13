@@ -12,6 +12,7 @@
 
 #include <windows.h>
 #include <iostream>
+#include <unordered_map>
 
 extern void PyEval_EvalFrameEx_eval_opcode_loop(int opcode);
 
@@ -244,16 +245,24 @@ void InstallBreakpointHook() {
 
 class DebugContext {
 public:
-    PyFrameObject* currentFrame = nullptr;
-    bool           shouldDebug  = false;
-    int            lastLine     = -1;
-    PyFrameObject* lastFrame    = nullptr;
+    PyFrameObject*                          currentFrame = nullptr;
+    bool                                    shouldDebug  = false;
+    std::unordered_map<PyFrameObject*, int> frameLastLines;
 
     void beginEval() { ++mEvalDepth; }
 
     void endEval() { --mEvalDepth; }
 
     [[nodiscard]] bool isEvaluating() const { return mEvalDepth > 0; }
+
+    int getLastLineForFrame(PyFrameObject* frame) {
+        auto it = frameLastLines.find(frame);
+        return (it != frameLastLines.end()) ? it->second : -1;
+    }
+
+    void setLastLineForFrame(PyFrameObject* frame, int line) { frameLastLines[frame] = line; }
+
+    void clearFrameRecord(PyFrameObject* frame) { frameLastLines.erase(frame); }
 
     class EvalScope {
     public:
@@ -342,6 +351,7 @@ SKY_AUTO_STATIC_HOOK(
 
         if (getDebugger().isRunning()) {
             getDebugger().onFrameExit(f);
+            gDebugCtx.clearFrameRecord(f);
         }
 
         return result;
@@ -356,21 +366,17 @@ void PyEval_EvalFrameEx_eval_opcode_loop(int opcode) {
     if (!gDebugCtx.shouldDebug) return;
     if (!gDebugCtx.currentFrame) return;
 
-    if (gDebugCtx.currentFrame != gDebugCtx.lastFrame) {
-        gDebugCtx.lastLine  = -1;
-        gDebugCtx.lastFrame = gDebugCtx.currentFrame;
-    }
-
-    int line = PyFrame_GetLineNumber(gDebugCtx.currentFrame);
-
-    if (line == gDebugCtx.lastLine) {
+    PyFrameObject* frame            = gDebugCtx.currentFrame;
+    int            line             = PyFrame_GetLineNumber(frame);
+    int            lastLineForFrame = gDebugCtx.getLastLineForFrame(frame);
+    if (line == lastLineForFrame) {
         return;
     }
 
-    gDebugCtx.lastLine = line;
+    gDebugCtx.setLastLineForFrame(frame, line);
 
     {
         DebugContext::EvalScope evalScope(gDebugCtx);
-        getDebugger().onLineExecute(gDebugCtx.currentFrame, line);
+        getDebugger().onLineExecute(frame, line);
     }
 }
