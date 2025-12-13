@@ -13,7 +13,7 @@
 #include <windows.h>
 #include <iostream>
 
-extern void PyEval_EvalFrameEx_eval_opcode_loop();
+extern void PyEval_EvalFrameEx_eval_opcode_loop(int opcode);
 
 
 SKY_AUTO_STATIC_HOOK(
@@ -171,6 +171,11 @@ void InstallBreakpointHook() {
     trampolineCode[offset++] = 0xEC;
     trampolineCode[offset++] = 0x20; // sub rsp, 0x20
 
+    // mov ecx, [rbp] - 将保存的 rbp（opcode）作为第一个参数传递
+    trampolineCode[offset++] = 0x8B;
+    trampolineCode[offset++] = 0x4D;
+    trampolineCode[offset++] = 0x00;
+
     trampolineCode[offset++]               = 0x48;
     trampolineCode[offset++]               = 0xB8;
     *(uint64_t*)(trampolineCode + offset)  = (uint64_t)&PyEval_EvalFrameEx_eval_opcode_loop;
@@ -237,22 +242,74 @@ void InstallBreakpointHook() {
 }
 
 
-thread_local PyFrameObject* currentFrame  = nullptr;
-thread_local bool           isShouldDebug = false;
+class DebugContext {
+public:
+    PyFrameObject* currentFrame = nullptr;
+    bool           shouldDebug  = false;
+    int            lastLine     = -1;
+    PyFrameObject* lastFrame    = nullptr;
 
-static bool g_dapInitialized = false;
+    void beginEval() { ++mEvalDepth; }
+
+    void endEval() { --mEvalDepth; }
+
+    [[nodiscard]] bool isEvaluating() const { return mEvalDepth > 0; }
+
+    class EvalScope {
+    public:
+        explicit EvalScope(DebugContext& ctx) : mCtx(ctx) { mCtx.beginEval(); }
+        ~EvalScope() { mCtx.endEval(); }
+
+        EvalScope(const EvalScope&)            = delete;
+        EvalScope& operator=(const EvalScope&) = delete;
+
+    private:
+        DebugContext& mCtx;
+    };
+
+    class FrameScope {
+    public:
+        explicit FrameScope(DebugContext& ctx, PyFrameObject* newFrame)
+        : mCtx(ctx),
+          mSavedFrame(ctx.currentFrame),
+          mSavedShouldDebug(ctx.shouldDebug) {
+            mCtx.currentFrame = newFrame;
+            mCtx.shouldDebug  = false;
+        }
+
+        ~FrameScope() {
+            mCtx.currentFrame = mSavedFrame;
+            mCtx.shouldDebug  = mSavedShouldDebug;
+        }
+
+        FrameScope(const FrameScope&)            = delete;
+        FrameScope& operator=(const FrameScope&) = delete;
+
+    private:
+        DebugContext&  mCtx;
+        PyFrameObject* mSavedFrame;
+        bool           mSavedShouldDebug;
+    };
+
+private:
+    int mEvalDepth = 0;
+};
+
+thread_local DebugContext gDebugCtx;
+
+static bool gDapInitialized = false;
 
 void initDAPDebugger(int port) {
-    if (!g_dapInitialized) {
-        g_dapInitialized = true;
+    if (!gDapInitialized) {
+        gDapInitialized = true;
         getDebugger().initialize(port);
         std::cout << "[DAP] Debugger initialized on port " << port << std::endl;
     }
 }
 
 void shutdownDAPDebugger() {
-    if (g_dapInitialized) {
-        g_dapInitialized = false;
+    if (gDapInitialized) {
+        gDapInitialized = false;
         getDebugger().shutdown();
         std::cout << "[DAP] Debugger shutdown" << std::endl;
     }
@@ -269,36 +326,51 @@ SKY_AUTO_STATIC_HOOK(
 ) {
     auto ver = *(int*)(((__int64*)f)[4] + 128);
     if (ver != 0xCA49B20F && ver != 0xBC58DBD5) { // magic number idk
-        isShouldDebug = false;
-        currentFrame  = f;
+
+        if (gDebugCtx.isEvaluating()) {
+            return origin(f, throwflag);
+        }
+
+        DebugContext::FrameScope frameScope(gDebugCtx, f);
 
         if (getDebugger().isRunning()) {
             getDebugger().onFrameEnter(f);
-            isShouldDebug = getDebugger().hasBreakpointInCurrentFrame();
+            gDebugCtx.shouldDebug = getDebugger().hasBreakpointInCurrentFrame();
         }
-        auto ori = origin(f, throwflag);
+
+        auto result = origin(f, throwflag);
+
         if (getDebugger().isRunning()) {
             getDebugger().onFrameExit(f);
         }
-        return ori;
+
+        return result;
     }
 
     return origin(f, throwflag);
 }
 
 
-void PyEval_EvalFrameEx_eval_opcode_loop() {
-    if (!isShouldDebug) return;
-    if (!currentFrame) return;
+void PyEval_EvalFrameEx_eval_opcode_loop(int opcode) {
+    if (gDebugCtx.isEvaluating()) return;
+    if (!gDebugCtx.shouldDebug) return;
+    if (!gDebugCtx.currentFrame) return;
 
-    static thread_local int lastLine = -1;
+    if (gDebugCtx.currentFrame != gDebugCtx.lastFrame) {
+        gDebugCtx.lastLine  = -1;
+        gDebugCtx.lastFrame = gDebugCtx.currentFrame;
+    }
 
-    int line = PyFrame_GetLineNumber(currentFrame);
+    int line = PyFrame_GetLineNumber(gDebugCtx.currentFrame);
 
-    if (line == lastLine) {
+    if (line == gDebugCtx.lastLine) {
         return;
     }
-    lastLine = line;
 
-    getDebugger().onLineExecute(currentFrame, line);
+    gDebugCtx.lastLine = line;
+
+    {
+        DebugContext::EvalScope evalScope(gDebugCtx);
+        getDebugger().onLineExecute(gDebugCtx.currentFrame, line);
+    }
 }
