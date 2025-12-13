@@ -1924,6 +1924,12 @@ void DAPDebugger::onFrameExit(PyFrameHandle frame) {
         mCachedFrame = nullptr;
         mCachedFilename.clear();
     }
+
+    if (mState == DebuggerState::Stepping && frame == mStepStartFrame) {
+        mState          = DebuggerState::Running;
+        mStepMode       = StepMode::None;
+        mStepStartFrame = nullptr;
+    }
 }
 
 
