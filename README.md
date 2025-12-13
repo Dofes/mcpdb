@@ -42,14 +42,22 @@ xmake
 
 ```jsonc
 {
-  "name": "Attach to Minecraft",
-  "type": "python",
-  "request": "attach",
-  "connect": { "host": "127.0.0.1", "port": 5678 }, //由 mcdbg 控制, -p 参数可修改端口
-  "pathMappings": [
+  "configurations": [
     {
-      "localRoot": "${workspaceFolder}/scripts",
-      "remoteRoot": "."
+      "name": "Minecraft Modpc Debug",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678 //由 mcdbg 控制, -p 参数可修改端口
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}",
+          "remoteRoot": "${workspaceFolder}"
+        }
+      ],
+      "justMyCode": false
     }
   ]
 }
