@@ -34,6 +34,8 @@ xmake
 
 ## Usage
 
+> 如果使用其他前端启动器（如 [mcdk](https://github.com/GitHub-Zero123/MCDevTool)），请参考对方的配置文档而不是此处的启动说明。
+
 1. 启动 `Modpc`
 2. 运行 `mcdbg.exe`
 3. VS Code 配置 `launch.json`：
