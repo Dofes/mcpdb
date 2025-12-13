@@ -765,7 +765,7 @@ bool isExpandable(PyHandle obj) {
     return true;
 }
 
-std::string getRepr(PyHandle obj, size_t maxLen) {
+std::string getRepr(PyHandle obj, int maxLen) {
     if (!obj) return "<null>";
 
     PyObject* repr = PyObject_Repr(PY(obj));
@@ -781,7 +781,7 @@ std::string getRepr(PyHandle obj, size_t maxLen) {
     }
     Py_DECREF(repr);
 
-    if (result.length() > maxLen) {
+    if (maxLen > 0 && result.length() > static_cast<size_t>(maxLen)) {
         result = result.substr(0, maxLen) + "...";
     }
     return result;

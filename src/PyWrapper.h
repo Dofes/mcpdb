@@ -170,7 +170,7 @@ std::vector<std::string> getDictKeys(PyHandle dict);
 bool isExpandable(PyHandle obj);
 
 // 获取对象的字符串表示，带长度限制
-std::string getRepr(PyHandle obj, size_t maxLen = 200);
+std::string getRepr(PyHandle obj, int maxLen = 100);
 
 // 安全获取字符串
 std::string getString(PyHandle obj);

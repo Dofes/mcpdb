@@ -1902,7 +1902,7 @@ std::string DAPDebugger::formatLogMessage(const std::string& message, PyHandle g
         if (code) {
             py::ObjectGuard evalResult(py::evalCode(code.get(), globals, locals));
             if (evalResult) {
-                value = py::getRepr(evalResult.get());
+                value = py::getRepr(evalResult.get(), -1);
             } else {
                 py::clearError();
                 value = "<error>";
