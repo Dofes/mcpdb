@@ -382,6 +382,8 @@ void DAPDebugger::handleRequest(const std::string& request) {
         } else if (command == "setBreakpoints") {
             std::cout << "[DAP] Setting breakpoints" << args.dump() << std::endl;
             processSetBreakpoints(seq, args);
+        } else if (command == "setExceptionBreakpoints") {
+            processSetExceptionBreakpoints(seq, args);
         } else if (command == "configurationDone") {
             processConfigurationDone(seq, args);
         } else if (command == "threads") {
@@ -429,26 +431,27 @@ void DAPDebugger::handleRequest(const std::string& request) {
 
 void DAPDebugger::processInitialize(int seq, const json& /*args*/) {
     json capabilities = {
-        { "supportsConfigurationDoneRequest",       true},
-        {      "supportsFunctionBreakpoints",      false},
-        {   "supportsConditionalBreakpoints",       true},
-        {"supportsHitConditionalBreakpoints",      false},
-        {                "supportsLogPoints",       true},
-        {        "supportsEvaluateForHovers",       true},
-        {                 "supportsStepBack",      false},
-        {              "supportsSetVariable",       true},
-        {             "supportsRestartFrame",      false},
-        {       "supportsGotoTargetsRequest",      false},
-        {     "supportsStepInTargetsRequest",      false},
-        {       "supportsCompletionsRequest",       true},
-        {      "completionTriggerCharacters", {".", "["}},
-        {           "supportsModulesRequest",      false},
-        {         "supportsExceptionOptions",      false},
-        {   "supportsValueFormattingOptions",      false},
-        {     "supportsExceptionInfoRequest",      false},
-        {         "supportTerminateDebuggee",       true},
-        { "supportsDelayedStackTraceLoading",      false},
-        {     "supportsLoadedSourcesRequest",      false}
+        { "supportsConfigurationDoneRequest",          true},
+        {      "supportsFunctionBreakpoints",         false},
+        {   "supportsConditionalBreakpoints",          true},
+        {"supportsHitConditionalBreakpoints",         false},
+        {                "supportsLogPoints",          true},
+        {        "supportsEvaluateForHovers",          true},
+        {                 "supportsStepBack",         false},
+        {              "supportsSetVariable",          true},
+        {             "supportsRestartFrame",         false},
+        {       "supportsGotoTargetsRequest",         false},
+        {     "supportsStepInTargetsRequest",         false},
+        {       "supportsCompletionsRequest",          true},
+        {      "completionTriggerCharacters",    {".", "["}},
+        {           "supportsModulesRequest",         false},
+        {         "supportsExceptionOptions",         false},
+        {   "supportsValueFormattingOptions",         false},
+        {     "supportsExceptionInfoRequest",         false},
+        {         "supportTerminateDebuggee",          true},
+        { "supportsDelayedStackTraceLoading",         false},
+        {     "supportsLoadedSourcesRequest",         false},
+        {       "exceptionBreakpointFilters", json::array()}
     };
 
     sendMessage(DAPMessageBuilder::response(seq, "initialize", true, capabilities));
@@ -463,6 +466,20 @@ void DAPDebugger::processLaunch(int seq, const json& /*args*/) {
 void DAPDebugger::processAttach(int seq, const json& /*args*/) {
     sendMessage(DAPMessageBuilder::response(seq, "attach", true));
     mState = DebuggerState::Running;
+}
+
+void DAPDebugger::processSetExceptionBreakpoints(int seq, const json& /*args*/) {
+    // 不支持异常断点，返回空的断点列表
+    sendMessage(
+        DAPMessageBuilder::response(
+            seq,
+            "setExceptionBreakpoints",
+            true,
+            {
+                {"breakpoints", json::array()}
+            }
+        )
+    );
 }
 
 void DAPDebugger::processSetBreakpoints(int seq, const json& args) {

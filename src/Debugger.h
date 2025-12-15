@@ -165,6 +165,7 @@ private:
     void processLaunch(int seq, const json& args);
     void processAttach(int seq, const json& args);
     void processSetBreakpoints(int seq, const json& args);
+    void processSetExceptionBreakpoints(int seq, const json& args);
     void processConfigurationDone(int seq, const json& args);
     void processThreads(int seq, const json& args);
     void processStackTrace(int seq, const json& args);
