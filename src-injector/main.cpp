@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 
 namespace fs = std::filesystem;
@@ -199,7 +200,7 @@ static HWND FindMinecraftOGLESWindowByPid(DWORD pid) {
     return st.hwnd;
 }
 
-// 检查进程是否为Minecraft（通过模块名判断）
+// 检查进程是否为Minecraft（通过可执行文件名判断）
 static bool IsMinecraftProcess(DWORD pid) {
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
     if (!hProcess) return false;
@@ -209,13 +210,141 @@ static bool IsMinecraftProcess(DWORD pid) {
     bool    result = false;
 
     if (QueryFullProcessImageNameW(hProcess, 0, exePath, &size)) {
-        std::wstring path(exePath);
-        // 检查是否包含 Minecraft 相关路径特征
-        result = (path.find(L"Minecraft") != std::wstring::npos || path.find(L"minecraft") != std::wstring::npos);
+        fs::path     p(exePath);
+        std::wstring filename = p.filename().wstring();
+        // 检查可执行文件名是否为 Minecraft.Windows.exe
+        result = (_wcsicmp(filename.c_str(), L"Minecraft.Windows.exe") == 0);
     }
 
     CloseHandle(hProcess);
     return result;
+}
+
+// 获取进程信息结构
+struct ProcessInfo {
+    DWORD        pid{};
+    std::wstring name;
+    std::wstring title;
+    bool         elevated{};
+};
+
+// 检查进程是否以管理员权限运行
+static bool IsProcessElevated(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) return false;
+
+    HANDLE hToken   = nullptr;
+    bool   elevated = false;
+
+    if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
+        TOKEN_ELEVATION elevation{};
+        DWORD           size = sizeof(elevation);
+        if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &size)) {
+            elevated = elevation.TokenIsElevated != 0;
+        }
+        CloseHandle(hToken);
+    }
+
+    CloseHandle(hProcess);
+    return elevated;
+}
+
+// 获取进程名称
+static std::wstring GetProcessName(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (!hProcess) return L"";
+
+    wchar_t      exePath[MAX_PATH]{};
+    DWORD        size = MAX_PATH;
+    std::wstring name;
+
+    if (QueryFullProcessImageNameW(hProcess, 0, exePath, &size)) {
+        fs::path p(exePath);
+        name = p.filename().wstring();
+    }
+
+    CloseHandle(hProcess);
+    return name;
+}
+
+// 枚举所有 Minecraft 进程
+static std::vector<ProcessInfo> EnumerateMinecraftProcesses() {
+    std::vector<ProcessInfo> processes;
+
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return processes;
+
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+
+    if (Process32FirstW(hSnapshot, &pe)) {
+        do {
+            if (IsMinecraftProcess(pe.th32ProcessID)) {
+                ProcessInfo info;
+                info.pid  = pe.th32ProcessID;
+                info.name = GetProcessName(pe.th32ProcessID);
+                if (info.name.empty()) info.name = pe.szExeFile;
+                info.elevated = IsProcessElevated(pe.th32ProcessID);
+
+                // 尝试获取窗口标题
+                HWND hwnd = FindMinecraftOGLESWindowByPid(pe.th32ProcessID);
+                if (hwnd) {
+                    int len = GetWindowTextLengthW(hwnd);
+                    if (len > 0) {
+                        info.title.resize(static_cast<size_t>(len) + 1);
+                        int wlen = GetWindowTextW(hwnd, info.title.data(), len + 1);
+                        if (wlen > 0) info.title.resize(static_cast<size_t>(wlen));
+                        else info.title.clear();
+                    }
+                }
+
+                processes.push_back(std::move(info));
+            }
+        } while (Process32NextW(hSnapshot, &pe));
+    }
+
+    CloseHandle(hSnapshot);
+    return processes;
+}
+
+// 转义 JSON 字符串
+static std::string EscapeJsonString(const std::wstring& ws) {
+    std::string s;
+    for (wchar_t wc : ws) {
+        if (wc == L'"') s += "\\\"";
+        else if (wc == L'\\') s += "\\\\";
+        else if (wc == L'\n') s += "\\n";
+        else if (wc == L'\r') s += "\\r";
+        else if (wc == L'\t') s += "\\t";
+        else if (wc < 0x80) s += static_cast<char>(wc);
+        else {
+            // UTF-8 编码
+            if (wc < 0x800) {
+                s += static_cast<char>(0xC0 | (wc >> 6));
+                s += static_cast<char>(0x80 | (wc & 0x3F));
+            } else {
+                s += static_cast<char>(0xE0 | (wc >> 12));
+                s += static_cast<char>(0x80 | ((wc >> 6) & 0x3F));
+                s += static_cast<char>(0x80 | (wc & 0x3F));
+            }
+        }
+    }
+    return s;
+}
+
+// 输出进程列表为 JSON
+static void PrintProcessListJson(const std::vector<ProcessInfo>& processes) {
+    std::cout << "{\n  \"processes\": [\n";
+    for (size_t i = 0; i < processes.size(); ++i) {
+        const auto& p = processes[i];
+        std::cout << "    {\n";
+        std::cout << "      \"pid\": " << p.pid << ",\n";
+        std::cout << "      \"name\": \"" << EscapeJsonString(p.name) << "\",\n";
+        std::cout << "      \"title\": \"" << EscapeJsonString(p.title) << "\",\n";
+        std::cout << "      \"elevated\": " << (p.elevated ? "true" : "false") << "\n";
+        std::cout << "    }" << (i + 1 < processes.size() ? "," : "") << "\n";
+    }
+    std::cout << "  ]\n}\n";
 }
 
 // 命令行参数解析
@@ -223,6 +352,7 @@ struct InjectorOptions {
     uint16_t port = 5678;
     DWORD    pid  = 0;
     bool     help = false;
+    bool     list = false;
 
     static InjectorOptions parse(int argc, char* argv[]) {
         InjectorOptions opts;
@@ -230,6 +360,8 @@ struct InjectorOptions {
             std::string arg = argv[i];
             if (arg == "-h" || arg == "--help") {
                 opts.help = true;
+            } else if (arg == "-l" || arg == "--list") {
+                opts.list = true;
             } else if ((arg == "-p" || arg == "--port") && i + 1 < argc) {
                 opts.port = static_cast<uint16_t>(std::stoi(argv[++i]));
             } else if (arg.starts_with("--port=")) {
@@ -248,6 +380,7 @@ struct InjectorOptions {
                   << "选项:\n"
                   << "  -p, --port <端口>  指定DAP调试器端口 (默认: 5678)\n"
                   << "  --pid <进程ID>     指定目标进程ID (不指定则自动搜索)\n"
+                  << "  -l, --list         列出所有目标进程 (JSON格式)\n"
                   << "  -h, --help         显示帮助信息\n";
     }
 };
@@ -258,6 +391,12 @@ int main(int argc, char* argv[]) {
     auto options = InjectorOptions::parse(argc, argv);
     if (options.help) {
         InjectorOptions::printUsage();
+        return EXIT_SUCCESS;
+    }
+
+    if (options.list) {
+        auto processes = EnumerateMinecraftProcesses();
+        PrintProcessListJson(processes);
         return EXIT_SUCCESS;
     }
 
