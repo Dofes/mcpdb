@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PyWrapper.h"
+#include "api/thread/GlobalThreadPauser.h"
 
 #include <nlohmann/json.hpp>
 
@@ -13,6 +14,7 @@
 #include <thread>
 #include <functional>
 #include <queue>
+#include <memory>
 #include <future>
 
 using json = nlohmann::json;
@@ -233,10 +235,11 @@ private:
     PyFrameHandle mStepStartFrame = nullptr;
 
     // 网络
-    int               mServerSocket = -1;
-    int               mClientSocket = -1;
-    std::thread       mServerThread;
-    std::atomic<bool> mServerRunning{false};
+    int                        mServerSocket   = -1;
+    int                        mClientSocket   = -1;
+    std::thread                mServerThread;
+    std::atomic<bool>          mServerRunning{false};
+    std::atomic<unsigned int>  mServerThreadId{0}; // 服务器线程ID，用于暂停线程时豁免
 
     // 命令同步
     std::mutex              mCommandMutex;
@@ -257,6 +260,9 @@ private:
     std::mutex              mServerStartMutex;
     std::condition_variable mServerStartCv;
     std::atomic<bool>       mServerStarted{false};
+
+    // 线程暂停器（断点触发时暂停其他线程）
+    std::unique_ptr<thread::GlobalThreadPauser> mThreadPauser;
 };
 
 DAPDebugger& getDebugger();

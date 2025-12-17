@@ -238,6 +238,9 @@ void DAPDebugger::startServer(int port) {
     std::unique_lock<std::mutex> startLock(mServerStartMutex);
 
     mServerThread = std::thread([this, port]() {
+        // 记录服务器线程ID，用于暂停线程时豁免
+        mServerThreadId = GetCurrentThreadId();
+
         auto notifyStarted = [this](bool success) {
             {
                 std::lock_guard<std::mutex> lock(mServerStartMutex);
@@ -477,7 +480,7 @@ void DAPDebugger::processSetExceptionBreakpoints(int seq, const json& /*args*/) 
             true,
             {
                 {"breakpoints", json::array()}
-            }
+    }
         )
     );
 }
@@ -761,6 +764,8 @@ void DAPDebugger::processContinue(int seq, const json& /*args*/) {
     mStepMode = StepMode::None;
     mState    = DebuggerState::Running;
     clearVariableReferences();
+    // 恢复所有被暂停的线程
+    mThreadPauser.reset();
     sendMessage(
         DAPMessageBuilder::response(
             seq,
@@ -780,6 +785,8 @@ void DAPDebugger::processNext(int seq, const json& /*args*/) {
     mStepDepth      = py::calculateFrameDepth(mCurrentFrame);
     mState          = DebuggerState::Stepping;
     clearVariableReferences();
+    // 恢复所有被暂停的线程
+    mThreadPauser.reset();
 
     sendMessage(DAPMessageBuilder::response(seq, "next", true));
     notifyCommandReceived();
@@ -790,6 +797,8 @@ void DAPDebugger::processStepIn(int seq, const json& /*args*/) {
     mStepStartFrame = mCurrentFrame;
     mState          = DebuggerState::Stepping;
     clearVariableReferences();
+    // 恢复所有被暂停的线程
+    mThreadPauser.reset();
 
     sendMessage(DAPMessageBuilder::response(seq, "stepIn", true));
     notifyCommandReceived();
@@ -801,6 +810,8 @@ void DAPDebugger::processStepOut(int seq, const json& /*args*/) {
     mStepDepth      = py::calculateFrameDepth(mCurrentFrame);
     mState          = DebuggerState::Stepping;
     clearVariableReferences();
+    // 恢复所有被暂停的线程
+    mThreadPauser.reset();
 
     sendMessage(DAPMessageBuilder::response(seq, "stepOut", true));
     notifyCommandReceived();
@@ -1485,6 +1496,8 @@ void DAPDebugger::processCompletions(int seq, const json& args) {
 void DAPDebugger::processDisconnect(int seq, const json& /*args*/) {
     sendMessage(DAPMessageBuilder::response(seq, "disconnect", true));
     mState = DebuggerState::Terminated;
+    // 恢复所有被暂停的线程
+    mThreadPauser.reset();
     notifyCommandReceived();
 }
 
@@ -1845,6 +1858,12 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
     }
 
     if (!shouldStop) return;
+
+    // 暂停所有其他线程，避免 Minecraft 线程补偿导致的卡顿
+    // 豁免调试器服务器线程，否则无法接收调试命令
+    mThreadPauser = std::make_unique<thread::GlobalThreadPauser>(
+        std::initializer_list<unsigned int>{mServerThreadId.load()}
+    );
 
     // 停止执行
     mState         = DebuggerState::Stopped;
