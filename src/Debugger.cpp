@@ -8,6 +8,22 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 
+#include "api/memory/Hook.h"
+
+namespace {
+std::atomic<bool>  freezeTime{false};
+std::atomic<DWORD> frozenTick{0};
+
+SKY_STATIC_HOOK(GetTickCountHook, memory::HookPriority::Normal, &GetTickCount, DWORD) {
+    if (freezeTime.load()) {
+        return frozenTick.load();
+    }
+    DWORD tick = origin();
+    frozenTick.store(tick);
+    return tick;
+}
+} // namespace
+
 namespace path_utils {
 
 // 路径映射表：模块路径 -> 文件系统路径
@@ -220,12 +236,15 @@ DAPDebugger::~DAPDebugger() {
 
 bool DAPDebugger::initialize(int port) {
     mState = DebuggerState::Initializing;
+    GetTickCountHook::hook();
     startServer(port);
     return true;
 }
 
 void DAPDebugger::shutdown() {
     mState = DebuggerState::Disconnected;
+    freezeTime.store(false);
+    GetTickCountHook::unhook();
     stopServer();
 }
 
@@ -764,6 +783,8 @@ void DAPDebugger::processContinue(int seq, const json& /*args*/) {
     mStepMode = StepMode::None;
     mState    = DebuggerState::Running;
     clearVariableReferences();
+    // 取消时间冻结
+    freezeTime.store(false);
     // 恢复所有被暂停的线程
     mThreadPauser.reset();
     sendMessage(
@@ -785,6 +806,8 @@ void DAPDebugger::processNext(int seq, const json& /*args*/) {
     mStepDepth      = py::calculateFrameDepth(mCurrentFrame);
     mState          = DebuggerState::Stepping;
     clearVariableReferences();
+    // 取消时间冻结
+    freezeTime.store(false);
     // 恢复所有被暂停的线程
     mThreadPauser.reset();
 
@@ -797,6 +820,8 @@ void DAPDebugger::processStepIn(int seq, const json& /*args*/) {
     mStepStartFrame = mCurrentFrame;
     mState          = DebuggerState::Stepping;
     clearVariableReferences();
+    // 取消时间冻结
+    freezeTime.store(false);
     // 恢复所有被暂停的线程
     mThreadPauser.reset();
 
@@ -810,6 +835,8 @@ void DAPDebugger::processStepOut(int seq, const json& /*args*/) {
     mStepDepth      = py::calculateFrameDepth(mCurrentFrame);
     mState          = DebuggerState::Stepping;
     clearVariableReferences();
+    // 取消时间冻结
+    freezeTime.store(false);
     // 恢复所有被暂停的线程
     mThreadPauser.reset();
 
@@ -1496,6 +1523,8 @@ void DAPDebugger::processCompletions(int seq, const json& args) {
 void DAPDebugger::processDisconnect(int seq, const json& /*args*/) {
     sendMessage(DAPMessageBuilder::response(seq, "disconnect", true));
     mState = DebuggerState::Terminated;
+    // 取消时间冻结
+    freezeTime.store(false);
     // 恢复所有被暂停的线程
     mThreadPauser.reset();
     notifyCommandReceived();
@@ -1858,12 +1887,13 @@ void DAPDebugger::onLineExecute(PyFrameHandle frame, int line) {
     }
 
     if (!shouldStop) return;
+    // 冻结时间
+    freezeTime.store(true);
 
     // 暂停所有其他线程，避免 Minecraft 线程补偿导致的卡顿
     // 豁免调试器服务器线程，否则无法接收调试命令
-    mThreadPauser = std::make_unique<thread::GlobalThreadPauser>(
-        std::initializer_list<unsigned int>{mServerThreadId.load()}
-    );
+    mThreadPauser =
+        std::make_unique<thread::GlobalThreadPauser>(std::initializer_list<unsigned int>{mServerThreadId.load()});
 
     // 停止执行
     mState         = DebuggerState::Stopped;
