@@ -8,6 +8,13 @@ add_requires("detours v4.0.1-xmake.1")
 add_requires("expected-lite v0.8.0")
 add_requires("fmt 10.2.1", {configs = {runtimes = "MD"}}) 
 
+-- 添加选项来控制 SigScan 测试模式
+option("sigscan_test")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable signature scan test mode")
+option_end()
+
 target("mcpdb")
     set_kind("shared")
     add_files("src/**.cpp")
@@ -28,6 +35,10 @@ target("mcpdb")
         "Py_BUILD_CORE"
         
         )
+    -- 如果启用了 sigscan_test 选项，添加测试宏
+    if has_config("sigscan_test") then
+        add_defines("MCPDB_SIGSCAN_TEST")
+    end
 
 
 
